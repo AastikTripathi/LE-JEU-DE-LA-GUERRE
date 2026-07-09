@@ -1,7 +1,4 @@
 
-
-
-
 // src/App.jsx
 import React, { useState, useEffect } from 'react';
 import { COLS, ROWS, GET_TERRAIN } from './constants';
@@ -26,6 +23,10 @@ export default function App() {
   const [canUndo, setCanUndo] = useState(false);
   const [roomUrl, setRoomUrl] = useState('');
 
+  // Player Identity States
+  const [mySide, setMySide] = useState(null);       // 'North' or 'South' — assigned by server
+  const [players, setPlayers] = useState({ North: null, South: null }); // Both player names
+
   // Auto-detect if a player arrived via a shareable invite link
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -48,8 +49,6 @@ export default function App() {
     window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`);
     setRoomUrl(window.location.href);
 
-    // Initialize network handshake containing names/passwords as clean URL query vectors
-    // const secureWsUrl = `ws://127.0.0.1:8000/ws/${encodeURIComponent(roomName.trim())}?name=${encodeURIComponent(playerName.trim())}&password=${encodeURIComponent(roomPassword.trim())}`;
     const isProd =
     !window.location.hostname.includes("localhost") &&
     !window.location.hostname.includes("127.0.0.1");
@@ -77,7 +76,7 @@ export default function App() {
       if (data.type === 'error') {
         setErrorMessage(data.message);
         // If password authentication fails on initial drop, kick user back to lobby screen
-        if (data.message.toLowerCase().includes('password') || data.message.toLowerCase().includes('authentication')) {
+        if (data.message.toLowerCase().includes('password') || data.message.toLowerCase().includes('authentication') || data.message.toLowerCase().includes('full')) {
           setInLobby(true);
           ws.close();
         } else {
@@ -91,6 +90,8 @@ export default function App() {
         setLocCells(data.linesOfCommunication);
         setConnectedUnitIds(data.connectedUnitIds);
         setCanUndo(data.canUndo ?? false);
+        if (data.yourSide) setMySide(data.yourSide);
+        if (data.players) setPlayers(data.players);
       }
     };
 
@@ -101,6 +102,8 @@ export default function App() {
 
     ws.onclose = () => {
       setInLobby(true);
+      setMySide(null);
+      setPlayers({ North: null, South: null });
     };
 
     setSocket(ws);
@@ -111,7 +114,12 @@ export default function App() {
     return acc;
   }, {});
 
+  // True when it is this client's turn to act
+  const isMyTurn = mySide === turn;
+
   const handleCellClick = (x, y) => {
+    if (!isMyTurn) return; // Silently ignore clicks on opponent's turn
+
     const clickedUnit = unitPositionsMap[`${x},${y}`];
 
     if (clickedUnit) {
@@ -131,6 +139,8 @@ export default function App() {
   };
 
   const handleAction = (actionType) => {
+    // Restart is allowed by either player; all other actions require it to be your turn
+    if (actionType !== 'restart' && !isMyTurn) return;
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ action: actionType }));
       setSelectedUnitId(null);
@@ -185,6 +195,10 @@ export default function App() {
     );
   }
 
+  const opponentSide = mySide === 'North' ? 'South' : 'North';
+  const opponentName = players[opponentSide];
+  const myName = players[mySide] ?? playerName;
+
   // LIVE CAMPAIGN BOARD RENDERING SCREEN
   return (
     <div style={styles.container}>
@@ -197,15 +211,48 @@ export default function App() {
           </div>
         </div>
 
+        {/* Player identity panel */}
+        <div style={styles.identityPanel}>
+          {/* Me */}
+          <div style={{ ...styles.playerTag, borderColor: mySide === 'North' ? '#3b82f6' : '#ef4444' }}>
+            <span style={{ fontSize: '9px', color: '#64748b', letterSpacing: '1px' }}>YOU</span>
+            <span style={{ color: mySide === 'North' ? '#60a5fa' : '#f87171', fontWeight: 'bold', fontSize: '13px' }}>
+              {myName}
+            </span>
+            <span style={{ ...styles.sidePip, backgroundColor: mySide === 'North' ? '#3b82f6' : '#ef4444' }}>
+              {mySide?.toUpperCase()}
+            </span>
+          </div>
+
+          <span style={{ color: '#475569', fontSize: '13px', fontWeight: 'bold', alignSelf: 'center' }}>VS</span>
+
+          {/* Opponent */}
+          <div style={{ ...styles.playerTag, borderColor: opponentSide === 'North' ? '#3b82f6' : '#ef4444', opacity: opponentName ? 1 : 0.4 }}>
+            <span style={{ fontSize: '9px', color: '#64748b', letterSpacing: '1px' }}>OPPONENT</span>
+            <span style={{ color: opponentSide === 'North' ? '#60a5fa' : '#f87171', fontWeight: 'bold', fontSize: '13px' }}>
+              {opponentName ?? 'Awaiting Commander...'}
+            </span>
+            <span style={{ ...styles.sidePip, backgroundColor: opponentSide === 'North' ? '#3b82f6' : '#ef4444' }}>
+              {opponentSide?.toUpperCase()}
+            </span>
+          </div>
+        </div>
+
         <div style={styles.controlPanel}>
-          <button onClick={() => handleAction('undo')} disabled={!canUndo} style={{ ...styles.btn, opacity: canUndo ? 1 : 0.3, cursor: canUndo ? 'pointer' : 'not-allowed' }}>
+          <button
+            onClick={() => handleAction('undo')}
+            disabled={!canUndo || !isMyTurn}
+            style={{ ...styles.btn, opacity: (canUndo && isMyTurn) ? 1 : 0.3, cursor: (canUndo && isMyTurn) ? 'pointer' : 'not-allowed' }}
+          >
             UNDO
           </button>
           <button onClick={() => handleAction('restart')} style={styles.btn}>
             RESTART MAP
           </button>
           <div style={{ ...styles.statusBadge, borderColor: turn === 'North' ? '#3b82f6' : '#ef4444' }}>
-            ARMY: <span style={{ color: turn === 'North' ? '#60a5fa' : '#f87171' }}>{turn.toUpperCase()}</span>
+            TURN: <span style={{ color: turn === 'North' ? '#60a5fa' : '#f87171' }}>
+              {players[turn] ? players[turn].toUpperCase() : turn.toUpperCase()}
+            </span>
           </div>
           <div style={styles.metricsBadge}>
             MOVES: <span style={styles.HighlightText}>{movesLeft}/5</span>
@@ -213,11 +260,22 @@ export default function App() {
           <div style={styles.metricsBadge}>
             ATTACK: <span style={{ color: attackExecuted ? '#ef4444' : '#10b981', fontWeight: 'bold' }}>{attackExecuted ? "USED" : "READY"}</span>
           </div>
-          <button onClick={() => handleAction('end_turn')} style={styles.endTurnButton}>
+          <button
+            onClick={() => handleAction('end_turn')}
+            disabled={!isMyTurn}
+            style={{ ...styles.endTurnButton, opacity: isMyTurn ? 1 : 0.4, cursor: isMyTurn ? 'pointer' : 'not-allowed' }}
+          >
             END STRATEGY PHASE
           </button>
         </div>
       </div>
+
+      {/* Turn indicator banner — shown when it's NOT your turn */}
+      {!isMyTurn && (
+        <div style={styles.waitingBanner}>
+          ⏳ AWAITING {players[turn] ? players[turn].toUpperCase() : turn.toUpperCase()}'S STRATEGY PHASE…
+        </div>
+      )}
 
       {errorMessage && (
         <div style={{
@@ -236,7 +294,7 @@ export default function App() {
 
           return (
             <div key={`${x}-${y}`} onClick={() => handleCellClick(x, y)}
-              style={{ ...styles.cell, backgroundColor: terrain.color, border: terrain.border || '1px solid #1f2937', outline: isSelected ? '3px solid #eab308' : 'none', zIndex: isSelected ? 10 : 1 }}
+              style={{ ...styles.cell, backgroundColor: terrain.color, border: terrain.border || '1px solid #1f2937', outline: isSelected ? '3px solid #eab308' : 'none', zIndex: isSelected ? 10 : 1, cursor: isMyTurn ? 'pointer' : 'default' }}
             >
               {!occupyingUnit && (isNorthLoc || isSouthLoc) && (
                 <div style={{ ...styles.locDot, backgroundColor: isNorthLoc && isSouthLoc ? '#a855f7' : isNorthLoc ? '#3b82f6' : '#ef4444' }} />
@@ -272,19 +330,26 @@ const styles = {
   lobbyButton: { backgroundColor: '#1e293b', border: '1px solid #475569', color: '#38bdf8', padding: '12px', borderRadius: '4px', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace', marginTop: '10px', letterSpacing: '1px' },
 
   // Game Interface Layout Elements
-  header: { width: '100%', maxWidth: '1100px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', borderBottom: '2px solid #334155', paddingBottom: '15px' },
+  header: { width: '100%', maxWidth: '1100px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '15px', borderBottom: '2px solid #334155', paddingBottom: '15px', gap: '20px', flexWrap: 'wrap' },
   title: { fontSize: '22px', letterSpacing: '4px', color: '#f1f5f9', fontWeight: 'bold', margin: 0 },
   sharePanel: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px', fontSize: '11px' },
-  linkInput: { backgroundColor: '#0f172a', border: '1px solid #334155', color: '#38bdf8', padding: '4px 10px', borderRadius: '4px', width: '340px', fontSize: '11px', fontFamily: 'monospace', cursor: 'pointer', outline: 'none' },
-  controlPanel: { display: 'flex', gap: '10px', alignItems: 'center' },
+  linkInput: { backgroundColor: '#0f172a', border: '1px solid #334155', color: '#38bdf8', padding: '4px 10px', borderRadius: '4px', width: '240px', fontSize: '11px', fontFamily: 'monospace', cursor: 'pointer', outline: 'none' },
+
+  // Player identity panel
+  identityPanel: { display: 'flex', gap: '12px', alignItems: 'stretch' },
+  playerTag: { display: 'flex', flexDirection: 'column', gap: '4px', backgroundColor: '#0f172a', border: '1px solid', borderRadius: '6px', padding: '8px 14px', minWidth: '130px' },
+  sidePip: { fontSize: '9px', padding: '2px 6px', borderRadius: '3px', color: '#020617', fontWeight: 'bold', letterSpacing: '1px', alignSelf: 'flex-start' },
+
+  controlPanel: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' },
   btn: { backgroundColor: '#0f172a', border: '1px solid #334155', color: '#f8fafc', padding: '9px 14px', borderRadius: '4px', cursor: 'pointer', fontFamily: 'monospace', fontSize: '12px' },
   statusBadge: { backgroundColor: '#0f172a', border: '2px solid', padding: '8px 14px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold' },
   metricsBadge: { backgroundColor: '#0f172a', border: '1px solid #334155', padding: '9px 14px', borderRadius: '4px', fontSize: '12px', color: '#94a3b8' },
   HighlightText: { color: '#f59e0b', fontWeight: 'bold' },
   endTurnButton: { backgroundColor: '#1e293b', border: '1px solid #64748b', color: '#f8fafc', padding: '9px 16px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace' },
   errorAlert: { width: '100%', maxWidth: '1080px', border: '1px solid', color: '#f8fafc', padding: '12px', borderRadius: '4px', marginBottom: '15px', fontSize: '13px' },
+  waitingBanner: { width: '100%', maxWidth: '1080px', backgroundColor: '#1c1917', border: '1px solid #44403c', color: '#a8a29e', padding: '10px 16px', borderRadius: '4px', marginBottom: '12px', fontSize: '12px', letterSpacing: '1px', textAlign: 'center' },
   gridContainer: { display: 'grid', gridTemplateColumns: 'repeat(25, minmax(0, 1fr))', gap: '2px', width: '100%', maxWidth: '1100px', backgroundColor: '#0f172a', padding: '10px', borderRadius: '8px', border: '1px solid #1e293b' },
-  cell: { position: 'relative', aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', userSelect: 'none' },
+  cell: { position: 'relative', aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' },
   unitBadge: { width: '82%', height: '82%', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', border: '2px solid', fontWeight: 'bold', fontSize: '13px', backgroundColor: '#020617', zIndex: 2 },
   locDot: { position: 'absolute', width: '7px', height: '7px', borderRadius: '50%', zIndex: 1, opacity: 0.8, boxShadow: '0 0 4px currentColor' },
   terrainLabel: { fontSize: '10px', opacity: 0.25 },

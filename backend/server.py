@@ -49,20 +49,28 @@ def initialize_room(room_id: str):
     if room_id not in rooms:
         rooms[room_id] = {
             "state": get_initial_state(),
-            "history": [],  # Stack to track turn snapshots for undo commands
-            "connections": []
+            "history": [],       # Stack to track turn snapshots for undo commands
+            "connections": [],   # List of {"ws": WebSocket, "name": str, "side": str|None}
+            "password": None
         }
 
 
 async def broadcast_room_state(room_id: str):
     room = rooms.get(room_id)
-    if not room: return
+    if not room:
+        return
 
     st = room["state"]
     n_loc = [[x, y] for x, y in engine.compute_lines_of_communication(st["units"], "North")]
     s_loc = [[x, y] for x, y in engine.compute_lines_of_communication(st["units"], "South")]
     connected = list(engine.get_connected_units(st["units"], "North")) + list(
         engine.get_connected_units(st["units"], "South"))
+
+    # Build a name → side map to send to all clients
+    players = {"North": None, "South": None}
+    for conn in room["connections"]:
+        if conn["side"] in ("North", "South"):
+            players[conn["side"]] = conn["name"]
 
     payload = {
         "units": st["units"],
@@ -71,13 +79,16 @@ async def broadcast_room_state(room_id: str):
         "attackExecuted": st["attack_executed_this_turn"],
         "linesOfCommunication": {"North": n_loc, "South": s_loc},
         "connectedUnitIds": connected,
-        "canUndo": len(room["history"]) > 0
+        "canUndo": len(room["history"]) > 0,
+        "players": players
     }
 
     for conn in room["connections"]:
         try:
-            await conn.send_json(payload)
-        except:
+            # Each client also learns their own assigned side
+            personal_payload = {**payload, "yourSide": conn["side"]}
+            await conn["ws"].send_json(personal_payload)
+        except Exception:
             pass
 
 
@@ -92,18 +103,61 @@ def save_state_to_history(room_id: str):
 
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
+    name = websocket.query_params.get("name", "Unknown")
+    password = websocket.query_params.get("password", "")
+
     await websocket.accept()
     initialize_room(room_id)
-    rooms[room_id]["connections"].append(websocket)
 
+    room = rooms[room_id]
+
+    # --- Password check ---
+    # The first player to connect sets the room password; subsequent players must match it.
+    if room["password"] is None:
+        room["password"] = password
+    elif room["password"] != password:
+        await websocket.send_json({"type": "error", "message": "Authentication failed: incorrect password."})
+        await websocket.close()
+        return
+
+    # --- Side assignment ---
+    # Count how many sides are already taken
+    taken_sides = {conn["side"] for conn in room["connections"] if conn["side"] is not None}
+
+    if "North" not in taken_sides:
+        assigned_side = "North"
+    elif "South" not in taken_sides:
+        assigned_side = "South"
+    else:
+        # Room is full — reject the 3rd+ connection
+        await websocket.send_json({
+            "type": "error",
+            "message": "Room is full. This battle already has two commanders."
+        })
+        await websocket.close()
+        return
+
+    conn_entry = {"ws": websocket, "name": name, "side": assigned_side}
+    room["connections"].append(conn_entry)
+
+    # Broadcast updated state so the new player immediately learns their side
     await broadcast_room_state(room_id)
 
     try:
         while True:
             data = await websocket.receive_json()
-            room = rooms[room_id]
             st = room["state"]
             action = data.get("action")
+
+            # --- Turn Authorization ---
+            # Only the player whose side matches the current turn may act.
+            # Exceptions: restart is always allowed by either player.
+            if action != "restart" and conn_entry["side"] != st["turn"]:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"It is {st['turn']}'s turn. Wait for your opponent."
+                })
+                continue
 
             if action == "move":
                 if st["moves_left"] <= 0:
@@ -170,9 +224,19 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 await broadcast_room_state(room_id)
 
     except WebSocketDisconnect:
-        rooms[room_id]["connections"].remove(websocket)
-        if not rooms[room_id]["connections"]:
+        room["connections"].remove(conn_entry)
+        if not room["connections"]:
             del rooms[room_id]  # Clean up memory if empty
+        else:
+            # Notify remaining player that their opponent disconnected
+            for remaining in room["connections"]:
+                try:
+                    await remaining["ws"].send_json({
+                        "type": "error",
+                        "message": f"Opponent '{name}' has disconnected."
+                    })
+                except Exception:
+                    pass
 
 
 import os
