@@ -37,7 +37,16 @@ class GameEngine:
         if "artillery" in u_type: return self.unit_stats["artillery"]
         return self.unit_stats["relay"]
 
+    # def compute_lines_of_communication(self, units: List[Dict], side: str) -> Set[Tuple[int, int]]:
     def compute_lines_of_communication(self, units: List[Dict], side: str) -> Set[Tuple[int, int]]:
+        # 1. Check if the opponent has occupied either of your Arsenals
+        opponent_side = "North" if side == "South" else "South"
+        enemy_pos = {(u['x'], u['y']) for u in units if u['side'] == opponent_side}
+
+        # If the enemy stands on either of your home arsenals, you have no LOC
+        for ax, ay in self.arsenals[side]:
+            if (ax, ay) in enemy_pos:
+                return set()  # Total network collapse
         active_loc_cells = set()
         enemy_positions = {(u['x'], u['y']) for u in units if u['side'] != side}
         friendly_relays = {u['id']: (u['x'], u['y']) for u in units if
@@ -146,10 +155,7 @@ class GameEngine:
             return {"valid": False, "reason": "No valid enemy target located on those coordinates."}
 
         # Rule Rule: An out-of-communication target drops instantly without defense calculations
-        target_connected = target_unit['id'] in self.get_connected_units(units, target_unit['side'])
-        if not target_connected:
-            return {"valid": True, "result": "DESTROY", "net_force": 99,
-                    "reason": "Target was out of communication. Instant destruction applied."}
+
 
         # Calculate Total Attacking Firepower
         total_offense = 0
@@ -182,6 +188,10 @@ class GameEngine:
                 stats = self.get_stats(u['type'])
                 if self.check_line_of_sight(u['x'], u['y'], target_x, target_y, stats['range'], units):
                     total_defense += stats['defense']
+
+        target_connected = target_unit['id'] in self.get_connected_units(units, target_unit['side'])
+        if not target_connected:
+            total_defense = max(1, total_defense // 2)
 
         net_force = total_offense - total_defense
 
