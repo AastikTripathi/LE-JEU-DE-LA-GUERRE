@@ -37,23 +37,34 @@ class GameEngine:
         if "artillery" in u_type: return self.unit_stats["artillery"]
         return self.unit_stats["relay"]
 
-    # def compute_lines_of_communication(self, units: List[Dict], side: str) -> Set[Tuple[int, int]]:
     def compute_lines_of_communication(self, units: List[Dict], side: str) -> Set[Tuple[int, int]]:
         # 1. Check if the opponent has occupied either of your Arsenals
         opponent_side = "North" if side == "South" else "South"
         enemy_pos = {(u['x'], u['y']) for u in units if u['side'] == opponent_side}
+        friendly_pos = {(u['x'], u['y']) for u in units if u['side'] == side}
 
         # If the enemy stands on either of your home arsenals, you have no LOC
         for ax, ay in self.arsenals[side]:
             if (ax, ay) in enemy_pos:
                 return set()  # Total network collapse
+
         active_loc_cells = set()
         enemy_positions = {(u['x'], u['y']) for u in units if u['side'] != side}
         friendly_relays = {u['id']: (u['x'], u['y']) for u in units if
                            u['side'] == side and 'relay' in u['type'].lower()}
 
+        # Start emitting from our own home arsenals
         emitters_queue = list(self.arsenals[side])
         processed_emitters = set(emitters_queue)
+
+        # --- CAPTURED ARSENAL MECHANIC ---
+        # If one of our units is standing on an enemy arsenal tile, that tile
+        # becomes an additional LoC emitter for us. This keeps our forward units
+        # supplied after a capture and lets them hunt down frozen remnants.
+        for ax, ay in self.arsenals[opponent_side]:
+            if (ax, ay) in friendly_pos and (ax, ay) not in processed_emitters:
+                emitters_queue.append((ax, ay))
+                processed_emitters.add((ax, ay))
 
         for ax, ay in emitters_queue:
             active_loc_cells.add((ax, ay))

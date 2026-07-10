@@ -77,7 +77,14 @@ def get_initial_state():
 
 
 def check_win_condition(units: list) -> str | None:
-    """Returns 'North', 'South', or None. Win by eliminating all enemies or occupying both enemy arsenals."""
+    """
+    Returns 'North', 'South', or None.
+    Win conditions:
+      1. Annihilation  — eliminate all enemy units.
+      2. Full Capture  — occupy BOTH enemy arsenal tiles simultaneously.
+         (Capturing one arsenal collapses enemy LoC and extends yours — but
+          you still need to hold both to claim total victory or destroy the remnants.)
+    """
     north_units = [u for u in units if u["side"] == "North"]
     south_units = [u for u in units if u["side"] == "South"]
 
@@ -89,13 +96,14 @@ def check_win_condition(units: list) -> str | None:
     north_pos = {(u["x"], u["y"]) for u in north_units}
     south_pos = {(u["x"], u["y"]) for u in south_units}
 
-    # Arsenal capture: enemy unit standing on your home arsenal = you lose
+    # Arsenal tile coordinates
     north_arsenals = {(12, 1), (13, 1)}
     south_arsenals = {(2, 18), (22, 18)}
 
-    if south_pos & north_arsenals:  # South occupying North's arsenal
+    # Full capture: you must occupy ALL enemy arsenal tiles at once
+    if north_arsenals.issubset(south_pos):   # South holds both North arsenals
         return "South"
-    if north_pos & south_arsenals:  # North occupying South's arsenal
+    if south_arsenals.issubset(north_pos):   # North holds both South arsenals
         return "North"
 
     return None
