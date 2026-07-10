@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import copy
 from engine import GameEngine
+import asyncio  # Needed for step-by-step delay pacing
+from ai import WarGameAI
 
 app = FastAPI()
 app.add_middleware(
@@ -23,20 +25,49 @@ rooms = {}
 def get_initial_state():
     return {
         "units": [
-            # --- NORTH FORCES ---
-            {"id": "n-inf-1", "side": "North", "type": "Infantry", "symbol": "I", "x": 10, "y": 3},
-            {"id": "n-inf-2", "side": "North", "type": "Infantry", "symbol": "I", "x": 11, "y": 3},
-            {"id": "n-inf-3", "side": "North", "type": "Infantry", "symbol": "I", "x": 12, "y": 3},
-            {"id": "n-cav-1", "side": "North", "type": "Cavalry", "symbol": "C", "x": 9, "y": 2},
-            {"id": "n-art-1", "side": "North", "type": "Artillery", "symbol": "A", "x": 12, "y": 2},
-            {"id": "n-rel-1", "side": "North", "type": "Relay", "symbol": "R", "x": 13, "y": 2},
-            # --- SOUTH FORCES ---
-            {"id": "s-inf-1", "side": "South", "type": "Infantry", "symbol": "I", "x": 11, "y": 16},
-            {"id": "s-inf-2", "side": "South", "type": "Infantry", "symbol": "I", "x": 12, "y": 16},
-            {"id": "s-inf-3", "side": "South", "type": "Infantry", "symbol": "I", "x": 13, "y": 16},
-            {"id": "s-cav-1", "side": "South", "type": "Cavalry", "symbol": "C", "x": 10, "y": 17},
-            {"id": "s-art-1", "side": "South", "type": "Artillery", "symbol": "A", "x": 12, "y": 17},
-            {"id": "s-rel-1", "side": "South", "type": "Relay", "symbol": "R", "x": 11, "y": 18},
+            # === NORTH FORCES (17 Units Total) ===
+            {"id": "n-inf-1", "side": "North", "type": "Infantry", "symbol": "I", "x": 4, "y": 4},
+            {"id": "n-inf-2", "side": "North", "type": "Infantry", "symbol": "I", "x": 6, "y": 4},
+            {"id": "n-inf-3", "side": "North", "type": "Infantry", "symbol": "I", "x": 8, "y": 4},
+            {"id": "n-inf-4", "side": "North", "type": "Infantry", "symbol": "I", "x": 10, "y": 4},
+            {"id": "n-inf-5", "side": "North", "type": "Infantry", "symbol": "I", "x": 12, "y": 4},
+            {"id": "n-inf-6", "side": "North", "type": "Infantry", "symbol": "I", "x": 14, "y": 4},
+            {"id": "n-inf-7", "side": "North", "type": "Infantry", "symbol": "I", "x": 16, "y": 4},
+            {"id": "n-inf-8", "side": "North", "type": "Infantry", "symbol": "I", "x": 18, "y": 4},
+            {"id": "n-inf-9", "side": "North", "type": "Infantry", "symbol": "I", "x": 20, "y": 4},
+
+            {"id": "n-cav-1", "side": "North", "type": "Cavalry", "symbol": "C", "x": 3, "y": 3},
+            {"id": "n-cav-2", "side": "North", "type": "Cavalry", "symbol": "C", "x": 7, "y": 3},
+            {"id": "n-cav-3", "side": "North", "type": "Cavalry", "symbol": "C", "x": 17, "y": 3},
+            {"id": "n-cav-4", "side": "North", "type": "Cavalry", "symbol": "C", "x": 21, "y": 3},
+
+            {"id": "n-art-1", "side": "North", "type": "Artillery", "symbol": "A", "x": 11, "y": 2},
+            {"id": "n-art-2", "side": "North", "type": "Artillery", "symbol": "A", "x": 13, "y": 2},
+
+            {"id": "n-rel-1", "side": "North", "type": "Relay", "symbol": "R", "x": 10, "y": 1},
+            {"id": "n-rel-2", "side": "North", "type": "Relay", "symbol": "R", "x": 14, "y": 1},
+
+            # === SOUTH FORCES (17 Units Total) ===
+            {"id": "s-inf-1", "side": "South", "type": "Infantry", "symbol": "I", "x": 4, "y": 15},
+            {"id": "s-inf-2", "side": "South", "type": "Infantry", "symbol": "I", "x": 6, "y": 15},
+            {"id": "s-inf-3", "side": "South", "type": "Infantry", "symbol": "I", "x": 8, "y": 15},
+            {"id": "s-inf-4", "side": "South", "type": "Infantry", "symbol": "I", "x": 10, "y": 15},
+            {"id": "s-inf-5", "side": "South", "type": "Infantry", "symbol": "I", "x": 12, "y": 15},
+            {"id": "s-inf-6", "side": "South", "type": "Infantry", "symbol": "I", "x": 14, "y": 15},
+            {"id": "s-inf-7", "side": "South", "type": "Infantry", "symbol": "I", "x": 16, "y": 15},
+            {"id": "s-inf-8", "side": "South", "type": "Infantry", "symbol": "I", "x": 18, "y": 15},
+            {"id": "s-inf-9", "side": "South", "type": "Infantry", "symbol": "I", "x": 20, "y": 15},
+
+            {"id": "s-cav-1", "side": "South", "type": "Cavalry", "symbol": "C", "x": 3, "y": 16},
+            {"id": "s-cav-2", "side": "South", "type": "Cavalry", "symbol": "C", "x": 7, "y": 16},
+            {"id": "s-cav-3", "side": "South", "type": "Cavalry", "symbol": "C", "x": 17, "y": 16},
+            {"id": "s-cav-4", "side": "South", "type": "Cavalry", "symbol": "C", "x": 21, "y": 16},
+
+            {"id": "s-art-1", "side": "South", "type": "Artillery", "symbol": "A", "x": 11, "y": 17},
+            {"id": "s-art-2", "side": "South", "type": "Artillery", "symbol": "A", "x": 13, "y": 17},
+
+            {"id": "s-rel-1", "side": "South", "type": "Relay", "symbol": "R", "x": 10, "y": 18},
+            {"id": "s-rel-2", "side": "South", "type": "Relay", "symbol": "R", "x": 14, "y": 18}
         ],
         "turn": "North",
         "moves_left": 5,
@@ -45,13 +76,28 @@ def get_initial_state():
     }
 
 
-def initialize_room(room_id: str):
+
+# def initialize_room(room_id: str, vs_ai: bool = False):
+#     if room_id not in rooms:
+#         rooms[room_id] = {
+#             "state": get_initial_state(),
+#             "history": [],       # Stack to track turn snapshots for undo commands
+#             "connections": [],   # List of {"ws": WebSocket, "name": str, "side": str|None}
+#             "password": None,
+#             "vs_ai": vs_ai       # Explicit mode flag stored directly in the room dict
+#         }
+
+
+def initialize_room(room_id: str, vs_ai: bool = False, ai_vs_ai: bool = False):
     if room_id not in rooms:
         rooms[room_id] = {
             "state": get_initial_state(),
-            "history": [],       # Stack to track turn snapshots for undo commands
-            "connections": [],   # List of {"ws": WebSocket, "name": str, "side": str|None}
-            "password": None
+            "history": [],
+            "connections": [],
+            "password": None,
+            "vs_ai": vs_ai,
+            "ai_vs_ai": ai_vs_ai, # Track if both sides are automated
+            "sim_running": False  # Flag to prevent spawning duplicate task threads
         }
 
 
@@ -101,15 +147,100 @@ def save_state_to_history(room_id: str):
     room["history"].append(copy.deepcopy(room["state"]))
 
 
+async def run_ai_simulation(room_id: str):
+    """Automated background task running both AI agents at maximum velocity."""
+    try:
+        while True:
+            room = rooms.get(room_id)
+            if not room or not room.get("ai_vs_ai", False) or not room["connections"]:
+                break
+
+            st = room["state"]
+            current_side = st["turn"]
+            ai_agent = WarGameAI(engine, side=current_side)
+
+            # Process actions rapidly
+            while st["turn"] == current_side and st["moves_left"] > 0:
+                # Scaled down to 50ms for ultra-rapid visual automation updates
+                await asyncio.sleep(0.05)
+
+                room = rooms.get(room_id)
+                if not room or not room.get("ai_vs_ai", False) or not room["connections"]:
+                    return
+
+                st = room["state"]
+                best_act = ai_agent.select_best_action(st)
+
+                if best_act["action_type"] == "end_turn":
+                    break
+
+                if best_act["action_type"] == "move":
+                    for u in st["units"]:
+                        if u["id"] == best_act["unitId"]:
+                            u["x"], u["y"] = best_act["x"], best_act["y"]
+                    st["moves_left"] -= 1
+                    st["moved_units_this_turn"].append(best_act["unitId"])
+
+                elif best_act["action_type"] == "attack":
+                    combat = engine.calculate_combat(st["units"], current_side, best_act["x"], best_act["y"])
+                    if combat.get("valid") and combat["result"] == "DESTROY":
+                        tx, ty = best_act["x"], best_act["y"]
+                        st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                    st["attack_executed_this_turn"] = True
+
+                await broadcast_room_state(room_id)
+
+            # Hand over active control matrix directly to opposing instance
+            room["history"].clear()
+            st["turn"] = "South" if current_side == "North" else "North"
+            st["moves_left"] = 5
+            st["moved_units_this_turn"] = []
+            st["attack_executed_this_turn"] = False
+            await broadcast_room_state(room_id)
+
+            # Brief micro-cooldown before next AI takes over
+            await asyncio.sleep(0.05)
+    finally:
+        room = rooms.get(room_id)
+        if room:
+            room["sim_running"] = False
+
+
+# @app.websocket("/ws/{room_id}")
+# async def websocket_endpoint(websocket: WebSocket, room_id: str):
+#     name = websocket.query_params.get("name", "Unknown")
+#     password = websocket.query_params.get("password", "")
+#     # Parse the boolean flag passed from the frontend toggle
+#     vs_ai = websocket.query_params.get("vs_ai", "false").lower() == "true"
+#
+#     await websocket.accept()
+#     initialize_room(room_id, vs_ai=vs_ai)
+#
+#     room = rooms[room_id]
+#
+#     # --- INSERT THIS PRECISE BLOCK HERE ---
+#     # If this is a single-player match, forcefully evict any ghost connections from a previous refresh
+#     if room.get("vs_ai", False):
+#         room["connections"] = []
+    # --------------------------------------
+
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
     name = websocket.query_params.get("name", "Unknown")
     password = websocket.query_params.get("password", "")
+    vs_ai = websocket.query_params.get("vs_ai", "false").lower() == "true"
+    ai_vs_ai = websocket.query_params.get("ai_vs_ai", "false").lower() == "true"
 
     await websocket.accept()
-    initialize_room(room_id)
+    initialize_room(room_id, vs_ai=vs_ai, ai_vs_ai=ai_vs_ai)
 
     room = rooms[room_id]
+
+    # Forcefully evict ghost entries if running an automated or solo testing sandbox
+    if room.get("vs_ai", False) or room.get("ai_vs_ai", False):
+        room["connections"] = []
+
+
 
     # --- Password check ---
     # The first player to connect sets the room password; subsequent players must match it.
@@ -120,28 +251,49 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         await websocket.close()
         return
 
-    # --- Side assignment ---
-    # Count how many sides are already taken
-    taken_sides = {conn["side"] for conn in room["connections"] if conn["side"] is not None}
 
-    if "North" not in taken_sides:
-        assigned_side = "North"
-    elif "South" not in taken_sides:
-        assigned_side = "South"
+    existing_conn = next((c for c in room["connections"] if c["name"] == name), None)
+
+    if existing_conn:
+        # Inherit your original side assignment and remove the stale ghost connection
+        assigned_side = existing_conn["side"]
+        room["connections"].remove(existing_conn)
+        try:
+            await existing_conn["ws"].close()
+        except Exception:
+            pass
     else:
-        # Room is full — reject the 3rd+ connection
-        await websocket.send_json({
-            "type": "error",
-            "message": "Room is full. This battle already has two commanders."
-        })
-        await websocket.close()
-        return
+        # Standard side assignment for a brand new player joining
+        taken_sides = {conn["side"] for conn in room["connections"] if conn["side"] is not None}
 
-    conn_entry = {"ws": websocket, "name": name, "side": assigned_side}
+        if "North" not in taken_sides:
+            assigned_side = "North"
+        elif "South" not in taken_sides:
+            assigned_side = "South"
+        else:
+            # Room is full — reject the 3rd+ connection
+            await websocket.send_json({
+                "type": "error",
+                "message": "Room is full. This battle already has two commanders."
+            })
+            await websocket.close()
+            return
+
+    # conn_entry = {"ws": websocket, "name": name, "side": assigned_side}
+    # room["connections"].append(conn_entry)
+    #
+    # # Broadcast updated state so the new player immediately learns their side
+    # await broadcast_room_state(room_id)
+
+    conn_entry = {"ws": websocket, "name": name, "side": assigned_side if not room.get("ai_vs_ai") else "Observer"}
     room["connections"].append(conn_entry)
 
-    # Broadcast updated state so the new player immediately learns their side
     await broadcast_room_state(room_id)
+
+    # Fire up the automated sandbox task if it isn't running yet
+    if room.get("ai_vs_ai", False) and not room.get("sim_running", False):
+        room["sim_running"] = True
+        asyncio.create_task(run_ai_simulation(room_id))
 
     try:
         while True:
@@ -214,6 +366,15 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 room["state"] = get_initial_state()
                 await broadcast_room_state(room_id)
 
+            # elif action == "end_turn":
+            #     room["history"].clear()  # Wipe undo stack when turn officially locks down
+            #     next_side = "South" if st["turn"] == "North" else "North"
+            #     st["turn"] = next_side
+            #     st["moves_left"] = 5
+            #     st["moved_units_this_turn"] = []
+            #     st["attack_executed_this_turn"] = False
+            #     await broadcast_room_state(room_id)
+
             elif action == "end_turn":
                 room["history"].clear()  # Wipe undo stack when turn officially locks down
                 next_side = "South" if st["turn"] == "North" else "North"
@@ -221,7 +382,50 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 st["moves_left"] = 5
                 st["moved_units_this_turn"] = []
                 st["attack_executed_this_turn"] = False
+
+                # Broadcast the shift to South's turn immediately
                 await broadcast_room_state(room_id)
+
+                # --- INTERCEPT FOR AI MATCH PLAY ---
+                # Trigger automation if the next turn belongs to South and the room name flags an AI setup
+                # if st["turn"] == "South" and "ai" in room_id.lower():
+                #     ai_agent = WarGameAI(engine, side="South")
+                if st["turn"] == "South" and room.get("vs_ai", False):
+                    ai_agent = WarGameAI(engine, side="South")
+
+                    # AI processes tactical actions step by step until its strategic points deplete
+                    while st["turn"] == "South" and st["moves_left"] > 0:
+                        # 800ms delay gives human players visual cues of enemy pieces sliding
+                        await asyncio.sleep(0.8)
+
+                        best_act = ai_agent.select_best_action(st)
+
+                        if best_act["action_type"] == "end_turn":
+                            break
+
+                        if best_act["action_type"] == "move":
+                            for u in st["units"]:
+                                if u["id"] == best_act["unitId"]:
+                                    u["x"], u["y"] = best_act["x"], best_act["y"]
+                            st["moves_left"] -= 1
+                            st["moved_units_this_turn"].append(best_act["unitId"])
+
+                        elif best_act["action_type"] == "attack":
+                            combat = engine.calculate_combat(st["units"], "South", best_act["x"], best_act["y"])
+                            if combat.get("valid") and combat["result"] == "DESTROY":
+                                tx, ty = best_act["x"], best_act["y"]
+                                st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                            st["attack_executed_this_turn"] = True
+
+                        # Sync intermediate update out to the active websocket connection
+                        await broadcast_room_state(room_id)
+
+                    # Return control seamlessly back to the human player (North)
+                    st["turn"] = "North"
+                    st["moves_left"] = 5
+                    st["moved_units_this_turn"] = []
+                    st["attack_executed_this_turn"] = False
+                    await broadcast_room_state(room_id)
 
     except WebSocketDisconnect:
         room["connections"].remove(conn_entry)
