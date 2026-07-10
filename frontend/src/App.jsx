@@ -50,6 +50,7 @@ export default function App() {
   // Player Identity States
   const [mySide, setMySide] = useState(null);
   const [players, setPlayers] = useState({ North: null, South: null });
+  const [winner, setWinner] = useState(null); // 'North', 'South', or null
 
   // Dynamically inject structural layout rules and transient laser animations
   useEffect(() => {
@@ -245,6 +246,7 @@ export default function App() {
 
         if (data.yourSide) setMySide(data.yourSide);
         if (data.players) setPlayers(data.players);
+        if (data.winner !== undefined) setWinner(data.winner);
       }
     };
 
@@ -253,6 +255,7 @@ export default function App() {
       setInLobby(true);
       setMySide(null);
       setPlayers({ North: null, South: null });
+      setWinner(null);
     };
 
     setSocket(ws);
@@ -300,7 +303,10 @@ export default function App() {
       socket.send(JSON.stringify({ action: actionType }));
       setSelectedUnitId(null);
       setMultiSelectedIds([]);
-      if (actionType === 'restart') setGraveyardTiles({});
+      if (actionType === 'restart') {
+        setGraveyardTiles({});
+        setWinner(null);
+      }
     }
   };
 
@@ -441,6 +447,60 @@ export default function App() {
 
   const myName = isAiVsAi ? "🤖 AI_NORTH" : (players[activeMySide] ?? playerName);
   const opponentName = isAiVsAi ? "🤖 AI_SOUTH" : (players[opponentSide] ?? (isSinglePlayer ? '🤖 CPU_TACTICIAN' : 'Awaiting Commander...'));
+
+  // WIN SCREEN OVERLAY
+  if (winner) {
+    const winnerName = players[winner] ?? (winner === 'South' && isSinglePlayer ? '🤖 CPU_TACTICIAN' : winner);
+    const isMyWin = winner === activeMySide;
+    const winColor = winner === 'North' ? '#3b82f6' : '#ef4444';
+    const winGlow = winner === 'North' ? 'rgba(59,130,246,0.4)' : 'rgba(239,68,68,0.4)';
+
+    return (
+      <div style={{ ...styles.container, justifyContent: 'center', minHeight: '100vh' }}>
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px',
+          padding: '60px 40px', backgroundColor: '#0f172a',
+          border: `2px solid ${winColor}`, borderRadius: '12px',
+          boxShadow: `0 0 60px ${winGlow}, 0 0 120px ${winGlow}`,
+          maxWidth: '520px', width: '100%', textAlign: 'center'
+        }}>
+          <div style={{ fontSize: '52px', marginBottom: '4px' }}>
+            {isMyWin ? '🏆' : '💀'}
+          </div>
+          <div style={{ fontSize: '11px', color: '#64748b', letterSpacing: '3px', fontWeight: 'bold' }}>
+            CAMPAIGN CONCLUDED
+          </div>
+          <div style={{ fontSize: '32px', fontWeight: 'bold', letterSpacing: '4px', color: winColor, textShadow: `0 0 20px ${winColor}` }}>
+            {winner.toUpperCase()} VICTORIOUS
+          </div>
+          <div style={{ fontSize: '14px', color: '#94a3b8' }}>
+            Commander <span style={{ color: winColor, fontWeight: 'bold' }}>{winnerName}</span> has won the battle
+          </div>
+
+          <div style={{ display: 'flex', gap: '24px', marginTop: '8px', fontSize: '12px', color: '#64748b' }}>
+            <div>
+              <div style={{ color: '#60a5fa', fontWeight: 'bold', marginBottom: '2px' }}>NORTH</div>
+              <div>Active: {units.filter(u => u.side === 'North').length}</div>
+              <div style={{ color: '#ef4444' }}>Lost: {INITIAL_UNITS.filter(u => u.side === 'North').length - units.filter(u => u.side === 'North').length}</div>
+            </div>
+            <div style={{ width: '1px', backgroundColor: '#334155' }} />
+            <div>
+              <div style={{ color: '#f87171', fontWeight: 'bold', marginBottom: '2px' }}>SOUTH</div>
+              <div>Active: {units.filter(u => u.side === 'South').length}</div>
+              <div style={{ color: '#ef4444' }}>Lost: {INITIAL_UNITS.filter(u => u.side === 'South').length - units.filter(u => u.side === 'South').length}</div>
+            </div>
+          </div>
+
+          <button
+            onClick={() => handleAction('restart')}
+            style={{ marginTop: '8px', backgroundColor: winColor, border: 'none', color: '#020617', padding: '12px 32px', borderRadius: '6px', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', letterSpacing: '2px', fontFamily: 'monospace' }}
+          >
+            ⚔ DEPLOY AGAIN
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={styles.container}>

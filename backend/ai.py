@@ -877,6 +877,11 @@ class WarGameAI:
         self.side = side
         self.enemy_side = "North" if side == "South" else "South"
 
+        # Option B: Controls how much we subtract the enemy's perspective score.
+        # 0.0 = pure offence (ignore what enemy wants), 1.0 = play purely to deny enemy goals.
+        self.defensive_weight = 0.5
+        self._enemy_evaluator = None  # Lazy-init — avoids infinite recursion at construction
+
         self.unit_values = {
             "artillery": 40,
             "cavalry": 55,
@@ -888,6 +893,55 @@ class WarGameAI:
     def get_path_distance_to_goal(self, x, y, target_y):
         """Heuristic: Manhattan distance to the target baseline."""
         return abs(target_y - y)
+
+    @property
+    def enemy_evaluator(self):
+        """Option B — Lazily constructs a WarGameAI from the enemy's POV for perspective scoring."""
+        if self._enemy_evaluator is None:
+            self._enemy_evaluator = WarGameAI(self.engine, side=self.enemy_side)
+            self._enemy_evaluator.defensive_weight = 0.0  # Enemy evaluator should not recurse
+        return self._enemy_evaluator
+
+    def detect_threats(self, units: list) -> float:
+        """
+        Option C — Explicit threat detection.
+        Scans the board for dangerous enemy positions and returns a negative penalty score.
+        This runs on the SIMULATED board after a candidate move, so moves that eliminate
+        threats naturally score higher than moves that leave threats in place.
+        """
+        threat_score = 0.0
+        enemy_units = [u for u in units if u.get("side") == self.enemy_side]
+
+        # --- Threat 1: Enemy near our Relay units ---
+        # Relays are the nervous system. An enemy within 4 tiles is an active danger.
+        friendly_relays = [
+            u for u in units
+            if u.get("side") == self.side and "relay" in u.get("type", "").lower()
+        ]
+        for relay in friendly_relays:
+            for enemy in enemy_units:
+                dist = abs(relay["x"] - enemy["x"]) + abs(relay["y"] - enemy["y"])
+                if dist <= 4:
+                    # Exponential danger — being 1 tile away is far worse than 4
+                    threat_score -= (5 - dist) * 180.0
+
+        # --- Threat 2: Enemy closing on our home arsenals ---
+        # An enemy near the arsenal is an existential threat.
+        for ax, ay in self.engine.arsenals[self.side]:
+            for enemy in enemy_units:
+                dist = abs(enemy["x"] - ax) + abs(enemy["y"] - ay)
+                if dist <= 9:
+                    threat_score -= (10 - dist) * 130.0
+
+        # --- Threat 3: Any friendly Relay that is ALREADY cut off ---
+        # A severed relay is a strategic catastrophe — scream loudly about it.
+        if friendly_relays:
+            connected_now = self.engine.get_connected_units(units, self.side)
+            for relay in friendly_relays:
+                if relay["id"] not in connected_now:
+                    threat_score -= 900.0  # Red alarm: relay is dark
+
+        return threat_score
 
     def evaluate_board(self, units: list, return_breakdown: bool = False,
                        base_enemy_connected: set = None) -> dict or float:
@@ -1020,7 +1074,12 @@ class WarGameAI:
             avg_y = sum(connected_y_positions) / len(connected_y_positions)
             cohesion_score += abs(home_y - avg_y) * 45.0
 
-        total_score = base_material + territory_score + role_score + cohesion_score + stacked_attack_pressure
+        # Phase 5: Explicit Threat Detection (Option C)
+        # Only run threat detection on the primary evaluator — not when the enemy_evaluator
+        # calls this recursively, to avoid infinite loops and double-counting.
+        threat_score = self.detect_threats(units) if self._enemy_evaluator is not None or self.defensive_weight > 0 else 0.0
+
+        total_score = base_material + territory_score + role_score + cohesion_score + stacked_attack_pressure + threat_score
 
         if return_breakdown:
             return {
@@ -1030,7 +1089,8 @@ class WarGameAI:
                 "Territory/LOC Size": territory_score,
                 "Role Execution Performance": role_score,
                 "Swarm Cohesion & Spacing": cohesion_score,
-                "Stacked Attack Pressure": stacked_attack_pressure
+                "Stacked Attack Pressure": stacked_attack_pressure,
+                "Threat Defence Score": threat_score
             }
         return total_score
 
@@ -1071,6 +1131,9 @@ class WarGameAI:
         except:
             start_north = start_south = set()
         base_enemy_connected = start_north if self.side == "South" else start_south
+        # base_my_connected is passed to the enemy evaluator so it knows which of OUR units
+        # were connected at the start of the turn (its 'base_enemy_connected').
+        base_my_connected = start_south if self.side == "South" else start_north
 
         actions = self.get_all_legal_moves(units, moved_this_turn)
         if not actions: return {"action_type": "end_turn"}
@@ -1091,14 +1154,22 @@ class WarGameAI:
                     elif combat["result"] == "RETREAT":
                         mod += 500.0
 
+                    # --- FINISH THEM: Heavy bonus for attacking cut-off (isolated) enemies ---
+                    # Even a failed attack on an isolated unit is strategically correct —
+                    # it weakens them further and prevents regrouping.
+                    target_connected = self.engine.get_connected_units(temp, self.enemy_side)
+                    target_unit = next(
+                        (u for u in temp if u["x"] == action["x"] and u["y"] == action["y"]), None
+                    )
+                    if target_unit and target_unit["id"] not in target_connected:
+                        mod += 800.0  # Aggressively pursue stragglers
+
             elif action["action_type"] == "move":
                 # Check for cohesion loss
                 lost = self.calculate_cohesion_loss(units, action["unitId"], action["x"], action["y"])
                 if lost > 0: mod -= (lost * 600.0)
 
                 # --- 2. STABILITY BONUS: Prevents Relay Oscillation ---
-                # A small bonus for staying still or moving only 1 tile
-                # helps break ties between two equal-scoring tiles.
                 unit = next(u for u in units if u['id'] == action["unitId"])
                 dist_moved = abs(unit['x'] - action['x']) + abs(unit['y'] - action['y'])
                 if dist_moved <= 1:
@@ -1107,10 +1178,24 @@ class WarGameAI:
                 for u in temp:
                     if u.get("id") == action["unitId"]: u["x"], u["y"] = action["x"], action["y"]
 
-            score = self.evaluate_board(temp, base_enemy_connected=base_enemy_connected) + mod
+            # --- 3. PRIMARY SCORE: How good is this position for us? ---
+            my_score = self.evaluate_board(temp, base_enemy_connected=base_enemy_connected)
+
+            # --- Option B: PERSPECTIVE SCORING ---
+            # Also evaluate how good this SAME board state is for the enemy.
+            # A great move isn't just one that helps us — it's one that also denies the enemy their goals.
+            # We subtract a fraction (defensive_weight) of the enemy's score from ours.
+            # This makes the AI naturally block, protect, and counter-position.
+            if self.defensive_weight > 0:
+                enemy_score = self.enemy_evaluator.evaluate_board(
+                    temp, base_enemy_connected=base_my_connected
+                )
+                score = (my_score - self.defensive_weight * enemy_score) + mod
+            else:
+                score = my_score + mod
 
             if score > best_score:
-                best_score, best_score_action = score, action
-                best_action = best_score_action
+                best_score = score
+                best_action = action
 
         return best_action if best_action else {"action_type": "end_turn"}

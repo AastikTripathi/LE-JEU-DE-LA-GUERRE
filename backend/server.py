@@ -76,6 +76,30 @@ def get_initial_state():
     }
 
 
+def check_win_condition(units: list) -> str | None:
+    """Returns 'North', 'South', or None. Win by eliminating all enemies or occupying both enemy arsenals."""
+    north_units = [u for u in units if u["side"] == "North"]
+    south_units = [u for u in units if u["side"] == "South"]
+
+    if not north_units:
+        return "South"
+    if not south_units:
+        return "North"
+
+    north_pos = {(u["x"], u["y"]) for u in north_units}
+    south_pos = {(u["x"], u["y"]) for u in south_units}
+
+    # Arsenal capture: enemy unit standing on your home arsenal = you lose
+    north_arsenals = {(12, 1), (13, 1)}
+    south_arsenals = {(2, 18), (22, 18)}
+
+    if south_pos & north_arsenals:  # South occupying North's arsenal
+        return "South"
+    if north_pos & south_arsenals:  # North occupying South's arsenal
+        return "North"
+
+    return None
+
 
 # def initialize_room(room_id: str, vs_ai: bool = False):
 #     if room_id not in rooms:
@@ -118,6 +142,8 @@ async def broadcast_room_state(room_id: str):
         if conn["side"] in ("North", "South"):
             players[conn["side"]] = conn["name"]
 
+    winner = check_win_condition(st["units"])
+
     payload = {
         "units": st["units"],
         "turn": st["turn"],
@@ -126,7 +152,8 @@ async def broadcast_room_state(room_id: str):
         "linesOfCommunication": {"North": n_loc, "South": s_loc},
         "connectedUnitIds": connected,
         "canUndo": len(room["history"]) > 0,
-        "players": players
+        "players": players,
+        "winner": winner
     }
 
     for conn in room["connections"]:
@@ -309,6 +336,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     "type": "error",
                     "message": f"It is {st['turn']}'s turn. Wait for your opponent."
                 })
+                continue
+
+            # Freeze all actions (except restart) once the game has a winner
+            if action != "restart" and check_win_condition(st["units"]):
+                await websocket.send_json({"type": "error", "message": "The battle is over. Restart to play again."})
                 continue
 
             if action == "move":
