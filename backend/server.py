@@ -44,8 +44,9 @@ def get_initial_state():
             {"id": "n-art-1", "side": "North", "type": "Artillery", "symbol": "A", "x": 11, "y": 2},
             {"id": "n-art-2", "side": "North", "type": "Artillery", "symbol": "A", "x": 13, "y": 2},
 
-            {"id": "n-rel-1", "side": "North", "type": "Relay", "symbol": "R", "x": 10, "y": 1},
-            {"id": "n-rel-2", "side": "North", "type": "Relay", "symbol": "R", "x": 14, "y": 1},
+            # FIXED: y coordinates changed from 1 to 0
+            {"id": "n-rel-1", "side": "North", "type": "Relay", "symbol": "R", "x": 10, "y": 0},
+            {"id": "n-rel-2", "side": "North", "type": "Relay", "symbol": "R", "x": 14, "y": 0},
 
             # === SOUTH FORCES (17 Units Total) ===
             {"id": "s-inf-1", "side": "South", "type": "Infantry", "symbol": "I", "x": 4, "y": 15},
@@ -66,13 +67,15 @@ def get_initial_state():
             {"id": "s-art-1", "side": "South", "type": "Artillery", "symbol": "A", "x": 11, "y": 17},
             {"id": "s-art-2", "side": "South", "type": "Artillery", "symbol": "A", "x": 13, "y": 17},
 
-            {"id": "s-rel-1", "side": "South", "type": "Relay", "symbol": "R", "x": 10, "y": 18},
-            {"id": "s-rel-2", "side": "South", "type": "Relay", "symbol": "R", "x": 14, "y": 18}
+            # FIXED: y coordinates changed from 18 to 19
+            {"id": "s-rel-1", "side": "South", "type": "Relay", "symbol": "R", "x": 10, "y": 19},
+            {"id": "s-rel-2", "side": "South", "type": "Relay", "symbol": "R", "x": 14, "y": 19}
         ],
         "turn": "North",
         "moves_left": 5,
         "moved_units_this_turn": [],
-        "attack_executed_this_turn": False
+        "attack_executed_this_turn": False,
+        "last_combat": None
     }
 
 
@@ -161,7 +164,8 @@ async def broadcast_room_state(room_id: str):
         "connectedUnitIds": connected,
         "canUndo": len(room["history"]) > 0,
         "players": players,
-        "winner": winner
+        "winner": winner,
+        "lastCombat": st.get("last_combat"),
     }
 
     for conn in room["connections"]:
@@ -197,6 +201,9 @@ async def run_ai_simulation(room_id: str):
             # Process actions rapidly
             while st["turn"] == current_side and st["moves_left"] > 0:
                 # Scaled down to 50ms for ultra-rapid visual automation updates
+                if check_win_condition(st["units"]):
+                    return
+
                 await asyncio.sleep(0.05)
 
                 room = rooms.get(room_id)
@@ -216,11 +223,25 @@ async def run_ai_simulation(room_id: str):
                     st["moves_left"] -= 1
                     st["moved_units_this_turn"].append(best_act["unitId"])
 
+                # elif best_act["action_type"] == "attack":
+                #     combat = engine.calculate_combat(st["units"], current_side, best_act["x"], best_act["y"])
+                #     if combat.get("valid") and combat["result"] == "DESTROY":
+                #         tx, ty = best_act["x"], best_act["y"]
+                #         st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                #     st["attack_executed_this_turn"] = True
+
                 elif best_act["action_type"] == "attack":
-                    combat = engine.calculate_combat(st["units"], current_side, best_act["x"], best_act["y"])
-                    if combat.get("valid") and combat["result"] == "DESTROY":
-                        tx, ty = best_act["x"], best_act["y"]
-                        st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                    tx, ty = best_act["x"], best_act["y"]
+                    mover = next((u for u in st["units"] if u["id"] == best_act["unitId"]), None)
+                    combat = engine.calculate_combat(st["units"], current_side, tx, ty)
+                    if combat.get("valid"):
+                        if combat["result"] == "DESTROY":
+                            st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                        st["last_combat"] = {
+                            "attackerX": mover["x"] if mover else tx,
+                            "attackerY": mover["y"] if mover else ty,
+                            "targetX": tx, "targetY": ty, "result": combat["result"]
+                        }
                     st["attack_executed_this_turn"] = True
 
                 await broadcast_room_state(room_id)
@@ -379,24 +400,43 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 tx, ty = data.get("x"), data.get("y")
                 combat = engine.calculate_combat(st["units"], st["turn"], tx, ty)
 
+            #     if combat.get("valid"):
+            #         save_state_to_history(room_id)  # Log history frame
+            #         res = combat["result"]
+            #         if res == "DESTROY":
+            #             st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+            #             msg = "Strike Success! Unit eliminated."
+            #         else:
+            #             msg = "Attack repelled."
+            #
+            #         st["attack_executed_this_turn"] = True
+            #         await broadcast_room_state(room_id)
+            #         await websocket.send_json({"type": "error", "message": msg})
+            #     else:
+            #         await websocket.send_json({"type": "error", "message": combat["reason"]})
+            #
+            # elif action == "undo":
+            #     if room["history"]:
+            #         room["state"] = room["history"].pop()  # Pop last state snapshot
+            #         await broadcast_room_state(room_id)
+
                 if combat.get("valid"):
                     save_state_to_history(room_id)  # Log history frame
                     res = combat["result"]
+                    attacker_unit = next((u for u in st["units"] if u["side"] == st["turn"] and
+                                          abs(u["x"] - tx) <= 3 and abs(u["y"] - ty) <= 3), None)
                     if res == "DESTROY":
                         st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
                         msg = "Strike Success! Unit eliminated."
                     else:
                         msg = "Attack repelled."
 
+                    st["last_combat"] = {
+                        "attackerX": attacker_unit["x"] if attacker_unit else tx,
+                        "attackerY": attacker_unit["y"] if attacker_unit else ty,
+                        "targetX": tx, "targetY": ty, "result": res
+                    }
                     st["attack_executed_this_turn"] = True
-                    await broadcast_room_state(room_id)
-                    await websocket.send_json({"type": "error", "message": msg})
-                else:
-                    await websocket.send_json({"type": "error", "message": combat["reason"]})
-
-            elif action == "undo":
-                if room["history"]:
-                    room["state"] = room["history"].pop()  # Pop last state snapshot
                     await broadcast_room_state(room_id)
                 else:
                     await websocket.send_json({"type": "error", "message": "Nothing left to undo."})
@@ -450,11 +490,25 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                             st["moves_left"] -= 1
                             st["moved_units_this_turn"].append(best_act["unitId"])
 
+                        # elif best_act["action_type"] == "attack":
+                        #     combat = engine.calculate_combat(st["units"], "South", best_act["x"], best_act["y"])
+                        #     if combat.get("valid") and combat["result"] == "DESTROY":
+                        #         tx, ty = best_act["x"], best_act["y"]
+                        #         st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                        #     st["attack_executed_this_turn"] = True
+
                         elif best_act["action_type"] == "attack":
-                            combat = engine.calculate_combat(st["units"], "South", best_act["x"], best_act["y"])
-                            if combat.get("valid") and combat["result"] == "DESTROY":
-                                tx, ty = best_act["x"], best_act["y"]
-                                st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                            tx, ty = best_act["x"], best_act["y"]
+                            mover = next((u for u in st["units"] if u["id"] == best_act["unitId"]), None)
+                            combat = engine.calculate_combat(st["units"], "South", tx, ty)
+                            if combat.get("valid"):
+                                if combat["result"] == "DESTROY":
+                                    st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                                st["last_combat"] = {
+                                    "attackerX": mover["x"] if mover else tx,
+                                    "attackerY": mover["y"] if mover else ty,
+                                    "targetX": tx, "targetY": ty, "result": combat["result"]
+                                }
                             st["attack_executed_this_turn"] = True
 
                         # Sync intermediate update out to the active websocket connection
