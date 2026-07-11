@@ -1,12 +1,28 @@
+
 // src/constants.js
 export const COLS = 25;
 export const ROWS = 20;
 
 export const TERRAIN_MAP = {
-  mountains: ['5,9', '6,9', '7,9', '17,10', '18,10', '19,10'],
-  passes: ['8,9', '16,10'],
-  arsenals: ['12,1', '13,1', '2,18', '22,18'],
-  forts: ['4,4', '20,4', '12,15']
+  // Authentic L-shaped configuration
+  mountains: [
+    // North Range
+    '9,2', '10,2', '11,2', '12,2',
+    '9,3', '9,4',
+    '9,6', '9,7', '9,8',
+    // South Range
+    '10,13', '11,13', '12,13', '13,13', '14,13', '15,13',
+    '15,15', '15,16', '15,17'
+  ],
+  // Pass gaps breaking through the mountain barriers
+  passes: ['9,5', '15,14'],
+  // Authentic Home Arsenals
+  arsenals: ['7,3', '14,1', '2,19', '22,19'],
+  // Historical Fortresses
+  forts: [
+    '7,1', '12,8', '20,7',    // North Fortifications
+    '2,12', '14,11', '22,14'  // South Fortifications
+  ]
 };
 
 export const GET_TERRAIN = (x, y) => {
