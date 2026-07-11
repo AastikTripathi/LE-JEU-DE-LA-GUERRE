@@ -1,6 +1,5 @@
 
 
-
 // src/App.jsx
 import React, { useState, useEffect, useRef } from 'react';
 import { COLS, ROWS, GET_TERRAIN } from './constants';
@@ -43,7 +42,8 @@ export default function App() {
   const [xKeyHeld, setXKeyHeld] = useState(false);
   const [multiSelectedIds, setMultiSelectedIds] = useState([]);
   const [tracers, setTracers] = useState([]);          // moving projectile dots
-  const [killFlash, setKillFlash] = useState(null);    // {x,y} of tile to flash red on kill
+  const [killFlash, setKillFlash] = useState(null);
+  const [repelFlash, setRepelFlash] = useState(null); // {x,y,result}// {x,y} of tile to flash red on kill
   const [graveyardTiles, setGraveyardTiles] = useState({}); // Tracks layout keys: {"x,y": count}
   const [showRules, setShowRules] = useState(false);   // info panel toggle
   const gridRef = useRef(null);
@@ -103,6 +103,24 @@ export default function App() {
         animation: skullPulse 2.2s ease-in-out infinite;
         filter: grayscale(30%);
       }
+      
+      @keyframes repelBloom {
+  0%   { opacity: 0.9; transform: scale(0.5); }
+  60%  { opacity: 0.6; transform: scale(1.3); }
+  100% { opacity: 0;   transform: scale(1.8); }
+}
+.repel-flash-blue {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle, #3b82f680 0%, transparent 70%);
+  border-radius: 3px; pointer-events: none; z-index: 150;
+  animation: repelBloom 0.55s ease-out forwards;
+}
+.repel-flash-amber {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle, #f59e0b80 0%, transparent 70%);
+  border-radius: 3px; pointer-events: none; z-index: 150;
+  animation: repelBloom 0.55s ease-out forwards;
+}
     `;
     document.head.appendChild(styleSheet);
     return () => styleSheet.remove();
@@ -269,6 +287,7 @@ export default function App() {
         }
       } else {
         setUnits(data.units || []);
+
         setTurn(data.turn);
         setMovesLeft(data.movesLeft ?? 5);
         setAttackExecuted(data.attackExecuted ?? false);
@@ -279,6 +298,10 @@ export default function App() {
         if (data.yourSide) setMySide(data.yourSide);
         if (data.players) setPlayers(data.players);
         if (data.winner !== undefined) setWinner(data.winner);
+        if (data.lastCombat && data.lastCombat.result !== "DESTROY") {
+  setRepelFlash({ x: data.lastCombat.targetX, y: data.lastCombat.targetY, result: data.lastCombat.result });
+  setTimeout(() => setRepelFlash(null), 600);
+}
       }
     };
 
@@ -685,6 +708,7 @@ export default function App() {
             const tileKey = `${x},${y}`;
             const hasResidue = graveyardTiles[tileKey] > 0;
             const isFlashing = killFlash && killFlash.x === x && killFlash.y === y;
+            const isRepelling = repelFlash && repelFlash.x === x && repelFlash.y === y;
 
             let stackOutline = 'none';
             if (isSelected) stackOutline = '3px solid #eab308';
@@ -711,6 +735,7 @@ export default function App() {
               >
                 {/* Kill flash bloom */}
                 {isFlashing && <div className="kill-flash" />}
+                {isRepelling && <div className={repelFlash.result === "RETREAT" ? "repel-flash-amber" : "repel-flash-blue"} />}
 
                 {/* Skull on graveyard tile (behind live unit if reoccupied) */}
                 {hasResidue && <span className="skull-marker">💀</span>}
