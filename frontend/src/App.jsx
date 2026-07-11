@@ -42,8 +42,10 @@ export default function App() {
   const [hoveredCell, setHoveredCell] = useState(null);
   const [xKeyHeld, setXKeyHeld] = useState(false);
   const [multiSelectedIds, setMultiSelectedIds] = useState([]);
-  const [tracers, setTracers] = useState([]);
+  const [tracers, setTracers] = useState([]);          // moving projectile dots
+  const [killFlash, setKillFlash] = useState(null);    // {x,y} of tile to flash red on kill
   const [graveyardTiles, setGraveyardTiles] = useState({}); // Tracks layout keys: {"x,y": count}
+  const [showRules, setShowRules] = useState(false);   // info panel toggle
   const gridRef = useRef(null);
   const prevUnitsRef = useRef(INITIAL_UNITS);
 
@@ -52,35 +54,54 @@ export default function App() {
   const [players, setPlayers] = useState({ North: null, South: null });
   const [winner, setWinner] = useState(null); // 'North', 'South', or null
 
-  // Dynamically inject structural layout rules and transient laser animations
+  // Dynamically inject structural layout rules and transient projectile animations
   useEffect(() => {
     const styleSheet = document.createElement("style");
     styleSheet.innerText = `
-      @keyframes tracerFade {
-        0% { opacity: 1; transform: scaleY(1); }
-        100% { opacity: 0; transform: scaleY(0); }
+      /* Projectile dot travelling across the grid */
+      @keyframes projectileTravel {
+        0%   { transform: translate(var(--px0), var(--py0)); opacity: 1; }
+        85%  { opacity: 1; }
+        100% { transform: translate(var(--px1), var(--py1)); opacity: 0; }
       }
-      .attack-tracer-line {
+      .projectile-dot {
         position: absolute;
-        z-index: 100;
-        background: rgba(239, 68, 68, 0.9);
-        box-shadow: 0 0 10px #ef4444, 0 0 4px #f59e0b;
-        transform-origin: top left;
-        pointer-events: none;
-        animation: tracerFade 0.45s cubic-bezier(0.1, 0.8, 0.25, 1) forwards;
-      }
-      .tile-residue {
-        position: absolute;
-        width: 44%;
-        height: 44%;
-        top: 28%;
-        left: 28%;
         border-radius: 50%;
-        background: repeating-linear-gradient(45deg, #27272a, #27272a 3px, #0f172a 3px, #0f172a 6px);
-        opacity: 0.75;
-        border: 1.5px dashed #4b5563;
-        z-index: 1;
         pointer-events: none;
+        z-index: 200;
+        animation: projectileTravel var(--dur) ease-in forwards;
+        left: 0; top: 0;
+      }
+
+      /* Red kill-flash bloom on target tile */
+      @keyframes killBloom {
+        0%   { opacity: 0.9; transform: scale(0.5); }
+        60%  { opacity: 0.7; transform: scale(1.4); }
+        100% { opacity: 0;   transform: scale(2); }
+      }
+      .kill-flash {
+        position: absolute; inset: 0;
+        background: radial-gradient(circle, #ef444480 0%, transparent 70%);
+        border-radius: 3px;
+        pointer-events: none;
+        z-index: 150;
+        animation: killBloom 0.55s ease-out forwards;
+      }
+
+      /* Skull pulsing on graveyard tile */
+      @keyframes skullPulse {
+        0%, 100% { opacity: 0.55; transform: translate(-50%,-50%) scale(1); }
+        50%       { opacity: 0.85; transform: translate(-50%,-50%) scale(1.15); }
+      }
+      .skull-marker {
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%,-50%);
+        font-size: 14px;
+        z-index: 3;
+        pointer-events: none;
+        animation: skullPulse 2.2s ease-in-out infinite;
+        filter: grayscale(30%);
       }
     `;
     document.head.appendChild(styleSheet);
@@ -103,7 +124,7 @@ export default function App() {
     };
   }, []);
 
-  // Intercept unit diffs to trigger visual attack tracers and update casualty craters
+  // Intercept unit diffs → animated projectile + kill flash + skull graveyard
   useEffect(() => {
     if (inLobby || !gridRef.current) {
       prevUnitsRef.current = units;
@@ -114,54 +135,65 @@ export default function App() {
     const currentMap = units.reduce((acc, u) => ({ ...acc, [u.id]: u }), {});
 
     let deadUnit = null;
-    // Discover units present in the last step that are missing now
     for (const id in prevMap) {
-      if (!currentMap[id]) {
-        deadUnit = prevMap[id];
-        break;
-      }
+      if (!currentMap[id]) { deadUnit = prevMap[id]; break; }
     }
 
     if (deadUnit) {
-      // Record historical wreck data directly on the target coordinates
+      // 1. Mark graveyard tile with skull
       const tileKey = `${deadUnit.x},${deadUnit.y}`;
       setGraveyardTiles(prev => ({ ...prev, [tileKey]: (prev[tileKey] || 0) + 1 }));
 
-      // Resolve absolute grid references to scale precise laser trajectories
+      // 2. Kill-flash on target tile
+      setKillFlash({ x: deadUnit.x, y: deadUnit.y });
+      setTimeout(() => setKillFlash(null), 600);
+
+      // 3. Animated projectile dot from nearest attacker to target
       const attackerSide = deadUnit.side === 'North' ? 'South' : 'North';
       const potentialAttackers = prevUnitsRef.current.filter(u => u.side === attackerSide);
 
+      let closestAttacker = null;
+      let closestDist = Infinity;
       potentialAttackers.forEach(attacker => {
-        const profile = UNIT_PROFILES[attacker.type.toLowerCase()];
-        const maxRange = attacker.type.toLowerCase() === 'artillery' ? 3 : 1;
+        const unitType = attacker.type.toLowerCase();
+        const maxRange = unitType === 'artillery' ? 3 : 1;
         const dx = Math.abs(deadUnit.x - attacker.x);
         const dy = Math.abs(deadUnit.y - attacker.y);
-
-        if (dx <= maxRange && dy <= maxRange) {
-          const startCell = gridRef.current.querySelector(`[data-coord="${attacker.x},${attacker.y}"]`);
-          const endCell = gridRef.current.querySelector(`[data-coord="${deadUnit.x},${deadUnit.y}"]`);
-
-          if (startCell && endCell) {
-            const gridRect = gridRef.current.getBoundingClientRect();
-            const startRect = startCell.getBoundingClientRect();
-            const endRect = endCell.getBoundingClientRect();
-
-            const x1 = startRect.left + startRect.width / 2 - gridRect.left;
-            const y1 = startRect.top + startRect.height / 2 - gridRect.top;
-            const x2 = endRect.left + endRect.width / 2 - gridRect.left;
-            const y2 = endRect.top + endRect.height / 2 - gridRect.top;
-
-            const distance = Math.hypot(x2 - x1, y2 - y1);
-            const angle = Math.atan2(y2 - y1, x2 - x1);
-            const traceId = Math.random().toString(36).substring(2, 9);
-
-            setTracers(prev => [...prev, { id: traceId, width: distance, left: x1, top: y1, angle }]);
-            setTimeout(() => {
-              setTracers(prev => prev.filter(t => t.id !== traceId));
-            }, 450);
-          }
+        const dist = Math.hypot(dx, dy);
+        if (dx <= maxRange && dy <= maxRange && dist < closestDist) {
+          closestDist = dist;
+          closestAttacker = attacker;
         }
       });
+
+      if (closestAttacker) {
+        const startCell = gridRef.current.querySelector(`[data-coord="${closestAttacker.x},${closestAttacker.y}"]`);
+        const endCell   = gridRef.current.querySelector(`[data-coord="${deadUnit.x},${deadUnit.y}"]`);
+
+        if (startCell && endCell) {
+          const gridRect  = gridRef.current.getBoundingClientRect();
+          const startRect = startCell.getBoundingClientRect();
+          const endRect   = endCell.getBoundingClientRect();
+
+          const x1 = startRect.left + startRect.width  / 2 - gridRect.left;
+          const y1 = startRect.top  + startRect.height / 2 - gridRect.top;
+          const x2 = endRect.left   + endRect.width    / 2 - gridRect.left;
+          const y2 = endRect.top    + endRect.height   / 2 - gridRect.top;
+
+          const unitType = closestAttacker.type.toLowerCase();
+          // Faster for cavalry, medium for infantry, slow arc for artillery
+          const dur = unitType === 'cavalry' ? '0.25s' : unitType === 'artillery' ? '0.6s' : '0.35s';
+          const color = unitType === 'artillery' ? '#f59e0b'   // amber shell
+                      : unitType === 'cavalry'   ? '#06b6d4'   // cyan streak
+                      : '#ef4444';                              // red infantry round
+          const size = unitType === 'artillery' ? 10 : 7;
+
+          const traceId = Math.random().toString(36).substring(2, 9);
+          setTracers(prev => [...prev, { id: traceId, x1, y1, x2, y2, dur, color, size }]);
+          const clearMs = unitType === 'artillery' ? 650 : unitType === 'cavalry' ? 300 : 400;
+          setTimeout(() => setTracers(prev => prev.filter(t => t.id !== traceId)), clearMs);
+        }
+      }
     }
     prevUnitsRef.current = units;
   }, [units, inLobby]);
@@ -560,7 +592,7 @@ export default function App() {
           <div style={styles.factionStatsBlock}>
             <div style={{ color: '#60a5fa', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>🔴 NORTH FORCES</div>
             <div style={styles.statRow}><span style={styles.statLabel}>ACTIVE:</span><span style={{ color: '#f8fafc', fontWeight: 'bold' }}>{northActive}</span></div>
-            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#ef4444' }}>{northDead}</span></div>
+            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#ef4444' }}>💀 {northDead}</span></div>
           </div>
 
           <div style={{ ...styles.sidebarDivider, margin: '14px 0' }} />
@@ -568,28 +600,79 @@ export default function App() {
           <div style={styles.factionStatsBlock}>
             <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>🔵 SOUTH FORCES</div>
             <div style={styles.statRow}><span style={styles.statLabel}>ACTIVE:</span><span style={{ color: '#f8fafc', fontWeight: 'bold' }}>{southActive}</span></div>
-            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#ef4444' }}>{southDead}</span></div>
+            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#ef4444' }}>💀 {southDead}</span></div>
           </div>
 
           <div style={{ ...styles.sidebarDivider, margin: '14px 0' }} />
-          <div style={{ fontSize: '9px', color: '#475569', lineHeight: '1.3' }}>
-            Objective: Sever enemy networks and target communication structures. Cut-off entities suffer extreme defensive penalties.
-          </div>
+
+          {/* ── RULES / INTEL TOGGLE ── */}
+          <button
+            onClick={() => setShowRules(r => !r)}
+            style={{ width: '100%', background: showRules ? '#1e3a5f' : '#0f172a', border: '1px solid #334155', color: '#38bdf8', padding: '5px 8px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: '1px', marginBottom: '8px' }}
+          >
+            {showRules ? '▲ HIDE FIELD MANUAL' : '▼ FIELD MANUAL'}
+          </button>
+
+          {showRules && (
+            <div style={{ fontSize: '9px', color: '#94a3b8', lineHeight: '1.7' }}>
+              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginBottom: '3px' }}>UNIT PROFILES</div>
+              {[
+                { sym: 'I', label: 'Infantry',  atk: 20, def: 40, rng: '1', color: '#60a5fa' },
+                { sym: 'C', label: 'Cavalry',   atk: 25, def: 25, rng: '1', color: '#34d399' },
+                { sym: 'A', label: 'Artillery', atk: 40, def: 20, rng: '3', color: '#f59e0b' },
+                { sym: 'R', label: 'Relay',     atk: 5,  def: 15, rng: '—', color: '#a78bfa' },
+              ].map(u => (
+                <div key={u.sym} style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #1e293b', paddingBottom: '2px', marginBottom: '2px' }}>
+                  <span style={{ color: u.color, fontWeight: 'bold', minWidth: '16px' }}>[{u.sym}]</span>
+                  <span style={{ color: '#cbd5e1', flex: 1, marginLeft: '4px' }}>{u.label}</span>
+                  <span>ATK <span style={{ color: '#f87171' }}>{u.atk}</span></span>
+                  <span style={{ marginLeft: '4px' }}>DEF <span style={{ color: '#34d399' }}>{u.def}</span></span>
+                  <span style={{ marginLeft: '4px' }}>RNG <span style={{ color: '#f59e0b' }}>{u.rng}</span></span>
+                </div>
+              ))}
+
+              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>STACKING (X + click)</div>
+              <div style={{ color: '#cbd5e1' }}>Line up 2+ units in a row → attack from the <em>entire line</em>. Combined ATK = sum of all stacked units. Range extends along the stack axis.</div>
+
+              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>COMBAT RESULTS</div>
+              <div>✅ <span style={{ color: '#10b981' }}>DESTROY</span> — combined ATK {'>'} DEF</div>
+              <div>↩ <span style={{ color: '#f59e0b' }}>RETREAT</span> — ATK ≈ DEF (push back)</div>
+              <div>✗ <span style={{ color: '#ef4444' }}>FAIL</span>   — ATK {'<'} DEF</div>
+
+              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>LINES OF COMM (LoC)</div>
+              <div style={{ color: '#cbd5e1' }}>Units <em>off</em> LoC are cut off: ATK→0, DEF halved (💀 easy targets). Relays extend your LoC grid. Enemy on your Arsenal = total LoC collapse.</div>
+
+              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>WIN CONDITIONS</div>
+              <div>⚔ Annihilate all enemy units</div>
+              <div>🏛 Occupy <em>both</em> enemy arsenals</div>
+            </div>
+          )}
+
+          {!showRules && (
+            <div style={{ fontSize: '9px', color: '#475569', lineHeight: '1.3' }}>
+              Objective: Sever enemy networks and target communication structures. Cut-off entities suffer extreme defensive penalties.
+            </div>
+          )}
         </div>
 
         {/* INTERACTIVE WAR MAP GRID */}
         <div ref={gridRef} style={styles.gridContainer}>
-          {/* Injected Tactical Fire Lines */}
+
+          {/* Animated projectile dots */}
           {tracers.map(t => (
             <div
               key={t.id}
-              className="attack-tracer-line"
+              className="projectile-dot"
               style={{
-                width: `${t.width}px`,
-                height: '3px',
-                left: `${t.left}px`,
-                top: `${t.top}px`,
-                transform: `rotate(${t.angle}rad)`
+                width: `${t.size}px`,
+                height: `${t.size}px`,
+                backgroundColor: t.color,
+                boxShadow: `0 0 8px ${t.color}, 0 0 3px #fff`,
+                '--px0': `${t.x1}px`,
+                '--py0': `${t.y1}px`,
+                '--px1': `${t.x2}px`,
+                '--py1': `${t.y2}px`,
+                '--dur': t.dur
               }}
             />
           ))}
@@ -601,6 +684,7 @@ export default function App() {
             const inRange = isEnemyInAttackRange(x, y);
             const tileKey = `${x},${y}`;
             const hasResidue = graveyardTiles[tileKey] > 0;
+            const isFlashing = killFlash && killFlash.x === x && killFlash.y === y;
 
             let stackOutline = 'none';
             if (isSelected) stackOutline = '3px solid #eab308';
@@ -625,8 +709,11 @@ export default function App() {
                   cursor: isMyTurn ? 'pointer' : 'default'
                 }}
               >
-                {/* Visual Graveyard Marks */}
-                {hasResidue && <div className="tile-residue" />}
+                {/* Kill flash bloom */}
+                {isFlashing && <div className="kill-flash" />}
+
+                {/* Skull on graveyard tile (behind live unit if reoccupied) */}
+                {hasResidue && <span className="skull-marker">💀</span>}
 
                 {!occupyingUnit && (isNorthLoc || isSouthLoc) && (
                   <div style={{ ...styles.locDot, backgroundColor: isNorthLoc && isSouthLoc ? '#a855f7' : isNorthLoc ? '#3b82f6' : '#ef4444' }} />
