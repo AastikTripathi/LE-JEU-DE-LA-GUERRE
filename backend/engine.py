@@ -255,29 +255,45 @@ class GameEngine:
 
         # Scan 8 directions from target to find aligned unit stacks
         for dx, dy in self.directions:
-            line_friendlies = []
+            head = None
+            distance = 0
+            blocked = False
             cx, cy = target_x + dx, target_y + dy
+            
             while 0 <= cx < self.cols and 0 <= cy < self.rows:
                 if (cx, cy) in self.mountains:
+                    blocked = True
                     break
                 
                 u = next((unit for unit in units if unit['x'] == cx and unit['y'] == cy), None)
                 if u:
                     if u['side'] == attacker_side:
-                        line_friendlies.append(u)
+                        head = u
+                        distance = max(abs(cx - target_x), abs(cy - target_y))
                     else:
-                        break
-                else:
-                    if line_friendlies:
-                        if len(line_friendlies) >= 2:
-                            for lf in line_friendlies:
-                                contributing_units.add(lf['id'])
-                        line_friendlies = []
+                        blocked = True
+                    break
                 cx += dx
                 cy += dy
-            if len(line_friendlies) >= 2:
-                for lf in line_friendlies:
-                    contributing_units.add(lf['id'])
+                
+            if head and not blocked:
+                stats = self.get_stats(head['type'])
+                if distance <= stats['range']:
+                    # Collect contiguous friendly units directly behind the head
+                    stack_units = [head]
+                    nx, ny = head['x'] + dx, head['y'] + dy
+                    while 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        u_behind = next((unit for unit in units if unit['x'] == nx and unit['y'] == ny), None)
+                        if u_behind and u_behind['side'] == attacker_side:
+                            stack_units.append(u_behind)
+                            nx += dx
+                            ny += dy
+                        else:
+                            break
+                    
+                    if len(stack_units) >= 2:
+                        for su in stack_units:
+                            contributing_units.add(su['id'])
 
         # Add single units that have line of sight within their base range
         for u in units:

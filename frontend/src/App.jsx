@@ -4,6 +4,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { COLS, ROWS, GET_TERRAIN } from './constants';
 import { INITIAL_UNITS } from './initialUnits';
+import Lobby from './components/Lobby';
+import RulesBook from './components/RulesBook';
 
 // Combat Profiles for Tactical Telemetry
 const UNIT_PROFILES = {
@@ -23,6 +25,7 @@ export default function App() {
   const [playerName, setPlayerName] = useState('');
   const [roomName, setRoomName] = useState('');
   const [roomPassword, setRoomPassword] = useState('');
+  const [isConnecting, setIsConnecting] = useState(false);
 
   // Game Core States
   const [units, setUnits] = useState(INITIAL_UNITS);
@@ -40,6 +43,7 @@ export default function App() {
   // Telemetry, Animations & Graveyard State Tracking
   const [hoveredCell, setHoveredCell] = useState(null);
   const [xKeyHeld, setXKeyHeld] = useState(false);
+  const [shiftKeyHeld, setShiftKeyHeld] = useState(false);
   const [multiSelectedIds, setMultiSelectedIds] = useState([]);
   const [tracers, setTracers] = useState([]);          // moving projectile dots
   const [killFlash, setKillFlash] = useState(null);
@@ -121,18 +125,50 @@ export default function App() {
   border-radius: 3px; pointer-events: none; z-index: 150;
   animation: repelBloom 0.55s ease-out forwards;
 }
+
+/* Oscillating Selection Glow */
+@keyframes selectionGlow {
+  0%, 100% {
+    box-shadow: 0 0 6px var(--glow-color), inset 0 0 4px var(--glow-color);
+    opacity: 0.9;
+  }
+  50% {
+    box-shadow: 0 0 16px var(--glow-color), inset 0 0 8px var(--glow-color);
+    opacity: 1;
+  }
+}
+.cell-selected-active {
+  --glow-color: #d4af37;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px solid #d4af37 !important;
+  z-index: 10 !important;
+}
+.cell-selected-multi-stack {
+  --glow-color: #10b981;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px solid #10b981 !important;
+  z-index: 10 !important;
+}
+.cell-selected-multi-shape {
+  --glow-color: #10b981;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px dashed #10b981 !important;
+  z-index: 10 !important;
+}
     `;
     document.head.appendChild(styleSheet);
     return () => styleSheet.remove();
   }, []);
 
-  // Track 'X' key down-states for group stack operations
+  // Track 'X' and 'Shift' key down-states for diagnostics and stack operations
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key.toLowerCase() === 'x') setXKeyHeld(true);
+      if (e.key === 'Shift') setShiftKeyHeld(true);
     };
     const handleKeyUp = (e) => {
       if (e.key.toLowerCase() === 'x') setXKeyHeld(false);
+      if (e.key === 'Shift') setShiftKeyHeld(false);
     };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -158,9 +194,14 @@ export default function App() {
     }
 
     if (deadUnit) {
-      // 1. Mark graveyard tile with skull
       const tileKey = `${deadUnit.x},${deadUnit.y}`;
-      setGraveyardTiles(prev => ({ ...prev, [tileKey]: (prev[tileKey] || 0) + 1 }));
+      setGraveyardTiles(prev => ({
+        ...prev,
+        [tileKey]: {
+          count: (prev[tileKey]?.count || 0) + 1,
+          side: deadUnit.side
+        }
+      }));
 
       // 2. Kill-flash on target tile
       setKillFlash({ x: deadUnit.x, y: deadUnit.y });
@@ -252,12 +293,16 @@ export default function App() {
     const backendHost = isProd ? "le-jeu-de-la-guerre.onrender.com" : "127.0.0.1:8000";
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
 
+    setIsConnecting(true);
+    setErrorMessage("Establishing connection... Note: Render servers may take 30-40 seconds to spin up from cold sleep.");
+
     const secureWsUrl = `${protocol}://${backendHost}/ws/${encodeURIComponent(finalRoom)}?name=${encodeURIComponent(playerName.trim())}&password=${encodeURIComponent(finalPassword)}&vs_ai=${gameMode === 'single'}&ai_vs_ai=${gameMode === 'ai_vs_ai'}`;
     const ws = new WebSocket(secureWsUrl);
 
     ws.onopen = () => {
       setInLobby(false);
       setErrorMessage('');
+      setIsConnecting(false);
     };
 
     ws.onmessage = (event) => {
@@ -305,15 +350,66 @@ export default function App() {
       }
     };
 
-    ws.onerror = () => setErrorMessage("Network Failure: Server did not respond to handshake.");
+    ws.onerror = () => {
+      setErrorMessage("Network Failure: Server did not respond to handshake. (Note: Render's free tier spins down after 15 mins of inactivity. Please refresh and try again in 30-40 seconds.)");
+      setIsConnecting(false);
+    };
     ws.onclose = () => {
       setInLobby(true);
       setMySide(null);
       setPlayers({ North: null, South: null });
       setWinner(null);
+      setIsConnecting(false);
     };
 
     setSocket(ws);
+  };
+
+  const getConnectedComponent = (startUnit, allUnits) => {
+    if (!startUnit) return [];
+    const component = [];
+    const queue = [startUnit];
+    const visitedIds = new Set([startUnit.id]);
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      component.push(current);
+
+      const neighbors = allUnits.filter(u => {
+        if (u.side !== startUnit.side || visitedIds.has(u.id)) return false;
+        const dx = Math.abs(u.x - current.x);
+        const dy = Math.abs(u.y - current.y);
+        return dx <= 1 && dy <= 1; // Contiguous adjacent chain (including diagonals)
+      });
+
+      for (const neighbor of neighbors) {
+        visitedIds.add(neighbor.id);
+        queue.push(neighbor);
+      }
+    }
+    return component;
+  };
+
+  const isSelectionConnected = (selectedIds) => {
+    if (selectedIds.length <= 1) return true;
+    const selectedUnits = units.filter(u => selectedIds.includes(u.id));
+    const start = selectedUnits[0];
+    const visited = new Set([start.id]);
+    const queue = [start];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const neighbors = selectedUnits.filter(u => {
+        if (visited.has(u.id)) return false;
+        const dx = Math.abs(u.x - current.x);
+        const dy = Math.abs(u.y - current.y);
+        return dx <= 1 && dy <= 1;
+      });
+      for (const n of neighbors) {
+        visited.add(n.id);
+        queue.push(n);
+      }
+    }
+    return visited.size === selectedIds.length;
   };
 
   const unitPositionsMap = units.reduce((acc, unit) => {
@@ -330,9 +426,15 @@ export default function App() {
     if (clickedUnit) {
       if (clickedUnit.side === turn) {
         if (xKeyHeld) {
-          setMultiSelectedIds(prev =>
-            prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
-          );
+          if (shiftKeyHeld) {
+            // Select the entire contiguous connected shape
+            const comp = getConnectedComponent(clickedUnit, units);
+            setMultiSelectedIds(comp.map(u => u.id));
+          } else {
+            setMultiSelectedIds(prev =>
+              prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
+            );
+          }
         } else {
           setSelectedUnitId(clickedUnit.id === selectedUnitId ? null : clickedUnit.id);
           setMultiSelectedIds(clickedUnit.id === selectedUnitId ? [] : [clickedUnit.id]);
@@ -362,6 +464,17 @@ export default function App() {
         setGraveyardTiles({});
         setWinner(null);
       }
+    }
+  };
+
+  const handleExitToLobby = () => {
+    if (socket) {
+      socket.close();
+    } else {
+      setInLobby(true);
+      setMySide(null);
+      setPlayers({ North: null, South: null });
+      setWinner(null);
     }
   };
 
@@ -411,16 +524,27 @@ export default function App() {
       const { stepX, stepY, sorted } = stackOrientation;
       const first = sorted[0];
       const crossProduct = (cellY - first.y) * stepX - (cellX - first.x) * stepY;
-      return crossProduct === 0;
+      if (crossProduct !== 0) return false;
+
+      // Find the unit in the stack closest to the target coordinate (the attacker head)
+      let head = null;
+      let minDistance = Infinity;
+      for (const u of sorted) {
+        const dist = Math.max(Math.abs(u.x - cellX), Math.abs(u.y - cellY));
+        if (dist < minDistance) {
+          minDistance = dist;
+          head = u;
+        }
+      }
+
+      if (!head) return false;
+      const headRange = head.type?.toLowerCase() === 'artillery' ? 3 : 2;
+      return minDistance <= headRange;
     } else if (selectedUnitId) {
       const origin = units.find(u => u.id === selectedUnitId);
       if (!origin) return false;
 
-      // Cut-off pieces have their effective attack power drops to 0 and cannot attack
-      const originConnected = connectedUnitIds.includes(origin.id);
-      if (!originConnected) return false;
-
-      const maxRange = origin.type?.toLowerCase() === 'artillery' ? 3 : 1;
+      const maxRange = origin.type?.toLowerCase() === 'artillery' ? 3 : 2;
       return Math.abs(cellX - origin.x) <= maxRange && Math.abs(cellY - origin.y) <= maxRange;
     }
     return false;
@@ -431,10 +555,10 @@ export default function App() {
     const base = UNIT_PROFILES[unit.type.toLowerCase()] || { attack: 10, defense: 10, label: "Asset" };
     const isConnected = connectedUnitIds.includes(unit.id);
 
-    // Penalize cut-off units: 0 Attack power and halved operational defense profile
+    // Penalize cut-off units: halved operational defense profile (can still attack normally)
     return {
       ...base,
-      attack: isConnected ? base.attack : 0,
+      attack: base.attack,
       currentDefense: isConnected ? base.defense : Math.round(base.defense * 0.5),
       isConnected
     };
@@ -451,46 +575,33 @@ export default function App() {
     const stats = getUnitLiveStats(u);
     return sum + (stats?.attack || 0);
   }, 0);
+  const totalDefensePower = activeAttackers.reduce((sum, u) => {
+    const stats = getUnitLiveStats(u);
+    return sum + (stats?.currentDefense || 0);
+  }, 0);
 
   const hoveredUnit = hoveredCell ? unitPositionsMap[`${hoveredCell.x},${hoveredCell.y}`] : null;
   const hoveredStats = getUnitLiveStats(hoveredUnit);
 
+  const debordPortrait = new URL('./assets/guy_debord.jpg', import.meta.url).href;
+  const heroImage = new URL('./assets/hero.png', import.meta.url).href;
+
   if (inLobby) {
     return (
-      <div style={styles.container}>
-        <div style={styles.lobbyCard}>
-          <h1 style={styles.lobbyTitle}>LE JEU DE LA GUERRE</h1>
-          <p style={styles.lobbySubtitle}>Select Game Mode</p>
-
-          <div style={styles.toggleContainer}>
-            <button type="button" onClick={() => setGameMode('single')} style={{...styles.toggleBtn, backgroundColor: gameMode === 'single' ? '#1e293b' : 'transparent', color: gameMode === 'single' ? '#38bdf8' : '#64748b'}}>SINGLE PLAYER</button>
-            <button type="button" onClick={() => setGameMode('multi')} style={{...styles.toggleBtn, backgroundColor: gameMode === 'multi' ? '#1e293b' : 'transparent', color: gameMode === 'multi' ? '#38bdf8' : '#64748b'}}>MULTIPLAYER</button>
-            <button type="button" onClick={() => setGameMode('ai_vs_ai')} style={{...styles.toggleBtn, backgroundColor: gameMode === 'ai_vs_ai' ? '#1e293b' : 'transparent', color: gameMode === 'ai_vs_ai' ? '#38bdf8' : '#64748b'}}>AI VS AI</button>
-          </div>
-
-          {errorMessage && <div style={styles.lobbyError}>{errorMessage}</div>}
-
-          <form onSubmit={handleConnectToRoom} style={styles.form}>
-            <div style={styles.inputGroup}>
-              <label style={styles.label}>TACTICAL CALLSIGN</label>
-              <input type="text" value={playerName} onChange={(e) => setPlayerName(e.target.value)} placeholder="Commander" style={styles.input} required />
-            </div>
-            {gameMode === 'multi' && (
-              <>
-                <div style={styles.inputGroup}>
-                  <label style={styles.label}>THEATER ROOM ID</label>
-                  <input type="text" value={roomName} onChange={(e) => setRoomName(e.target.value)} placeholder="sector-7" style={styles.input} required />
-                </div>
-                <div style={styles.inputGroup}>
-                  <label style={styles.label}>ACCESS KEY</label>
-                  <input type="password" value={roomPassword} onChange={(e) => setRoomPassword(e.target.value)} placeholder="••••••••" style={styles.input} required />
-                </div>
-              </>
-            )}
-            <button type="submit" style={styles.lobbyButton}>LAUNCH OPERATIONS</button>
-          </form>
-        </div>
-      </div>
+      <Lobby
+        gameMode={gameMode}
+        setGameMode={setGameMode}
+        playerName={playerName}
+        setPlayerName={setPlayerName}
+        roomName={roomName}
+        setRoomName={setRoomName}
+        roomPassword={roomPassword}
+        setRoomPassword={setRoomPassword}
+        errorMessage={errorMessage}
+        handleConnectToRoom={handleConnectToRoom}
+        debordPortrait={debordPortrait}
+        isConnecting={isConnecting}
+      />
     );
   }
 
@@ -507,48 +618,45 @@ export default function App() {
   if (winner) {
     const winnerName = players[winner] ?? (winner === 'South' && isSinglePlayer ? '🤖 CPU_TACTICIAN' : winner);
     const isMyWin = winner === activeMySide;
-    const winColor = winner === 'North' ? '#3b82f6' : '#ef4444';
-    const winGlow = winner === 'North' ? 'rgba(59,130,246,0.4)' : 'rgba(239,68,68,0.4)';
+    const winColor = winner === 'North' ? '#002fa7' : '#991b1b';
 
     return (
       <div style={{ ...styles.container, justifyContent: 'center', minHeight: '100vh' }}>
         <div style={{
           display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px',
-          padding: '60px 40px', backgroundColor: '#0f172a',
-          border: `2px solid ${winColor}`, borderRadius: '12px',
-          boxShadow: `0 0 60px ${winGlow}, 0 0 120px ${winGlow}`,
-          maxWidth: '520px', width: '100%', textAlign: 'center'
+          padding: '60px 40px', backgroundColor: '#ffffff',
+          border: '1px solid #002fa7', borderRadius: '12px',
+          boxShadow: '0 4px 20px rgba(0, 47, 167, 0.08)',
+          maxWidth: '520px', width: '100%', textAlign: 'center',
+          color: '#002fa7', boxSizing: 'border-box'
         }}>
-          <div style={{ fontSize: '52px', marginBottom: '4px' }}>
-            {isMyWin ? '🏆' : '💀'}
-          </div>
-          <div style={{ fontSize: '11px', color: '#64748b', letterSpacing: '3px', fontWeight: 'bold' }}>
+          <div style={{ fontSize: '11px', color: '#475569', letterSpacing: '3px', fontWeight: 'bold' }}>
             CAMPAIGN CONCLUDED
           </div>
-          <div style={{ fontSize: '32px', fontWeight: 'bold', letterSpacing: '4px', color: winColor, textShadow: `0 0 20px ${winColor}` }}>
+          <div style={{ fontSize: '32px', fontWeight: 'bold', letterSpacing: '4px', color: winColor }}>
             {winner.toUpperCase()} VICTORIOUS
           </div>
-          <div style={{ fontSize: '14px', color: '#94a3b8' }}>
+          <div style={{ fontSize: '14px', color: '#475569' }}>
             Commander <span style={{ color: winColor, fontWeight: 'bold' }}>{winnerName}</span> has won the battle
           </div>
 
-          <div style={{ display: 'flex', gap: '24px', marginTop: '8px', fontSize: '12px', color: '#64748b' }}>
+          <div style={{ display: 'flex', gap: '24px', marginTop: '8px', fontSize: '12px', color: '#475569', justifyContent: 'center', width: '100%' }}>
             <div>
-              <div style={{ color: '#60a5fa', fontWeight: 'bold', marginBottom: '2px' }}>NORTH</div>
+              <div style={{ color: '#002fa7', fontWeight: 'bold', marginBottom: '2px' }}>NORTH</div>
               <div>Active: {units.filter(u => u.side === 'North').length}</div>
-              <div style={{ color: '#ef4444' }}>Lost: {INITIAL_UNITS.filter(u => u.side === 'North').length - units.filter(u => u.side === 'North').length}</div>
+              <div style={{ color: '#991b1b', fontWeight: 'bold' }}>Lost: {INITIAL_UNITS.filter(u => u.side === 'North').length - units.filter(u => u.side === 'North').length}</div>
             </div>
-            <div style={{ width: '1px', backgroundColor: '#334155' }} />
+            <div style={{ width: '1px', backgroundColor: '#002fa7' }} />
             <div>
-              <div style={{ color: '#f87171', fontWeight: 'bold', marginBottom: '2px' }}>SOUTH</div>
+              <div style={{ color: '#991b1b', fontWeight: 'bold', marginBottom: '2px' }}>SOUTH</div>
               <div>Active: {units.filter(u => u.side === 'South').length}</div>
-              <div style={{ color: '#ef4444' }}>Lost: {INITIAL_UNITS.filter(u => u.side === 'South').length - units.filter(u => u.side === 'South').length}</div>
+              <div style={{ color: '#991b1b', fontWeight: 'bold' }}>Lost: {INITIAL_UNITS.filter(u => u.side === 'South').length - units.filter(u => u.side === 'South').length}</div>
             </div>
           </div>
 
           <button
             onClick={() => handleAction('restart')}
-            style={{ marginTop: '8px', backgroundColor: winColor, border: 'none', color: '#020617', padding: '12px 32px', borderRadius: '6px', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', letterSpacing: '2px', fontFamily: 'monospace' }}
+            style={{ marginTop: '8px', backgroundColor: '#002fa7', border: 'none', color: '#ffffff', padding: '12px 32px', borderRadius: '6px', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', letterSpacing: '2px', fontFamily: 'monospace' }}
           >
             ⚔ DEPLOY AGAIN
           </button>
@@ -572,290 +680,394 @@ export default function App() {
         </div>
 
         <div style={styles.identityPanel}>
-          <div style={{ ...styles.playerTag, borderColor: activeMySide === 'North' ? '#3b82f6' : '#ef4444' }}>
-            <span style={{ fontSize: '9px', color: '#64748b' }}>YOU</span>
-            <span style={{ color: activeMySide === 'North' ? '#60a5fa' : '#f87171', fontWeight: 'bold', fontSize: '13px' }}>{myName}</span>
+          <div style={{ ...styles.playerTag, borderColor: activeMySide === 'North' ? '#002fa7' : '#991b1b' }}>
+            <span style={{ fontSize: '9px', color: '#475569' }}>YOU</span>
+            <span style={{ color: activeMySide === 'North' ? '#002fa7' : '#991b1b', fontWeight: 'bold', fontSize: '13px' }}>{myName}</span>
           </div>
-          <span style={{ color: '#475569', fontSize: '12px', alignSelf: 'center' }}>VS</span>
-          <div style={{ ...styles.playerTag, borderColor: opponentSide === 'North' ? '#3b82f6' : '#ef4444' }}>
-            <span style={{ fontSize: '9px', color: '#64748b' }}>OPPONENT</span>
-            <span style={{ color: opponentSide === 'North' ? '#60a5fa' : '#f87171', fontWeight: 'bold', fontSize: '13px' }}>{opponentName}</span>
+          <span style={{ color: '#002fa7', fontSize: '12px', alignSelf: 'center' }}>VS</span>
+          <div style={{ ...styles.playerTag, borderColor: opponentSide === 'North' ? '#002fa7' : '#991b1b' }}>
+            <span style={{ fontSize: '9px', color: '#475569' }}>OPPONENT</span>
+            <span style={{ color: opponentSide === 'North' ? '#002fa7' : '#991b1b', fontWeight: 'bold', fontSize: '13px' }}>{opponentName}</span>
           </div>
         </div>
-
         <div style={styles.controlPanel}>
+          <button onClick={handleExitToLobby} style={{ ...styles.fixedBtn, borderColor: '#991b1b', color: '#991b1b' }}>EXIT</button>
           <button onClick={() => handleAction('undo')} disabled={!canUndo || !isMyTurn} style={{ ...styles.fixedBtn, opacity: (canUndo && isMyTurn) ? 1 : 0.3 }}>UNDO</button>
           <button onClick={() => handleAction('restart')} style={styles.fixedBtn}>RESTART</button>
-          <div style={{ ...styles.statusBadge, borderColor: turn === 'North' ? '#3b82f6' : '#ef4444' }}>
-            TURN: <span style={{ color: turn === 'North' ? '#60a5fa' : '#f87171' }}>{players[turn] ? players[turn].toUpperCase() : turn.toUpperCase()}</span>
+          <div style={{ ...styles.statusBadge, borderColor: turn === 'North' ? '#002fa7' : '#991b1b' }}>
+            TURN: <span style={{ color: turn === 'North' ? '#002fa7' : '#991b1b' }}>{players[turn] ? players[turn].toUpperCase() : turn.toUpperCase()}</span>
           </div>
           <div style={styles.metricsBadge}>MOVES: <span style={styles.HighlightText}>{movesLeft}/5</span></div>
           <div style={styles.metricsBadge}>
-            ATTACK: <span style={{ color: attackExecuted ? '#ef4444' : '#10b981', fontWeight: 'bold' }}>{attackExecuted ? "USED" : "READY"}</span>
+            ATTACK: <span style={{ color: attackExecuted ? '#991b1b' : '#10b981', fontWeight: 'bold' }}>{attackExecuted ? "USED" : "READY"}</span>
           </div>
           <button onClick={() => handleAction('end_turn')} disabled={!isMyTurn} style={{ ...styles.endTurnButton, opacity: isMyTurn ? 1 : 0.4 }}>END TURN</button>
         </div>
       </div>
-
       {isAiVsAi ? (
         <div style={styles.waitingBanner}>🛰️ SIMULATION ACTIVE: OBSERVING {turn.toUpperCase()} TACTICAL MATRIX...</div>
       ) : (
         !isMyTurn && <div style={styles.waitingBanner}>{isSinglePlayer ? "🤖 AI CALCULATING ASSAULT VECTORS..." : `⏳ AWAITING OPPONENT...`}</div>
       )}
-      {errorMessage && <div style={{...styles.errorAlert, backgroundColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#064e3b' : '#7f1d1d', borderColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#10b981' : '#f87171'}}>📡 SYSTEM LOG: {errorMessage}</div>}
+      {errorMessage && <div style={{...styles.errorAlert, backgroundColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#d1fae5' : '#fee2e2', borderColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#10b981' : '#fca5a5', color: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#065f46' : '#991b1b'}}>📡 SYSTEM LOG: {errorMessage}</div>}
 
       {/* TWO-COLUMN SIDEBAR INTERFACE WRAPPER */}
       <div style={styles.workspaceLayout}>
 
         {/* SIDEBAR STATUS REPORT PANEL */}
         <div style={styles.sidebarPanel}>
-          <div style={{ fontWeight: 'bold', color: '#38bdf8', fontSize: '12px', marginBottom: '10px', letterSpacing: '1px' }}>📊 BATTLEFIELD REPORT</div>
+          <div style={{ fontWeight: 'bold', color: '#002fa7', fontSize: '12px', marginBottom: '10px', letterSpacing: '1px' }}>📊 BATTLEFIELD REPORT</div>
           <div style={styles.sidebarDivider} />
 
           <div style={styles.factionStatsBlock}>
-            <div style={{ color: '#60a5fa', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>🔴 NORTH FORCES</div>
-            <div style={styles.statRow}><span style={styles.statLabel}>ACTIVE:</span><span style={{ color: '#f8fafc', fontWeight: 'bold' }}>{northActive}</span></div>
-            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#ef4444' }}>💀 {northDead}</span></div>
+            <div style={{ color: '#002fa7', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>🔴 NORTH FORCES</div>
+            <div style={styles.statRow}><span style={styles.statLabel}>ACTIVE:</span><span style={{ color: '#002fa7', fontWeight: 'bold' }}>{northActive}</span></div>
+            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#991b1b', fontWeight: 'bold' }}>💀 {northDead}</span></div>
           </div>
 
           <div style={{ ...styles.sidebarDivider, margin: '14px 0' }} />
 
           <div style={styles.factionStatsBlock}>
-            <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>🔵 SOUTH FORCES</div>
-            <div style={styles.statRow}><span style={styles.statLabel}>ACTIVE:</span><span style={{ color: '#f8fafc', fontWeight: 'bold' }}>{southActive}</span></div>
-            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#ef4444' }}>💀 {southDead}</span></div>
+            <div style={{ color: '#991b1b', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>🔵 SOUTH FORCES</div>
+            <div style={styles.statRow}><span style={styles.statLabel}>ACTIVE:</span><span style={{ color: '#991b1b', fontWeight: 'bold' }}>{southActive}</span></div>
+            <div style={styles.statRow}><span style={styles.statLabel}>CASUALTIES:</span><span style={{ color: '#991b1b', fontWeight: 'bold' }}>💀 {southDead}</span></div>
           </div>
 
           <div style={{ ...styles.sidebarDivider, margin: '14px 0' }} />
 
           {/* ── RULES / INTEL TOGGLE ── */}
           <button
-            onClick={() => setShowRules(r => !r)}
-            style={{ width: '100%', background: showRules ? '#1e3a5f' : '#0f172a', border: '1px solid #334155', color: '#38bdf8', padding: '5px 8px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: '1px', marginBottom: '8px' }}
+            onClick={() => setShowRules(true)}
+            style={{ width: '100%', background: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', padding: '6px 8px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: '1px', marginBottom: '12px', fontWeight: 'bold' }}
           >
-            {showRules ? '▲ HIDE FIELD MANUAL' : '▼ FIELD MANUAL'}
+            📋 FIELD MANUAL
           </button>
 
-          {showRules && (
-            <div style={{ fontSize: '9px', color: '#94a3b8', lineHeight: '1.7' }}>
-              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginBottom: '3px' }}>UNIT PROFILES</div>
-              {[
-                { sym: 'I', label: 'Infantry',  atk: 20, def: 40, rng: '1', color: '#60a5fa' },
-                { sym: 'C', label: 'Cavalry',   atk: 25, def: 25, rng: '1', color: '#34d399' },
-                { sym: 'A', label: 'Artillery', atk: 40, def: 20, rng: '3', color: '#f59e0b' },
-                { sym: 'R', label: 'Relay',     atk: 5,  def: 15, rng: '—', color: '#a78bfa' },
-              ].map(u => (
-                <div key={u.sym} style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #1e293b', paddingBottom: '2px', marginBottom: '2px' }}>
-                  <span style={{ color: u.color, fontWeight: 'bold', minWidth: '16px' }}>[{u.sym}]</span>
-                  <span style={{ color: '#cbd5e1', flex: 1, marginLeft: '4px' }}>{u.label}</span>
-                  <span>ATK <span style={{ color: '#f87171' }}>{u.atk}</span></span>
-                  <span style={{ marginLeft: '4px' }}>DEF <span style={{ color: '#34d399' }}>{u.def}</span></span>
-                  <span style={{ marginLeft: '4px' }}>RNG <span style={{ color: '#f59e0b' }}>{u.rng}</span></span>
+          {/* Radar Intel panel inside sidebar */}
+          <div style={{
+            backgroundColor: '#ffffff',
+            border: '1px solid #002fa7',
+            borderRadius: '4px',
+            padding: '10px',
+            fontSize: '10px',
+            color: '#002fa7',
+            marginTop: '4px'
+          }}>
+            <div style={{ fontWeight: 'bold', color: '#002fa7', marginBottom: '6px', fontSize: '10px', borderBottom: '1px solid #002fa7', paddingBottom: '4px' }}>📡 RADAR INTEL</div>
+
+            {multiSelectedIds.length > 0 ? (
+              <div>
+                <div style={{ color: '#002fa7', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>
+                  {multiSelectedIds.length === 1 ? "SINGLE UNIT SELECTION" : "GROUP TELEMETRY"}
                 </div>
-              ))}
+                <div style={{ fontSize: '10px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <div>DIVISIONS: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{multiSelectedIds.length}</span></div>
+                  <div>GROUP ATK: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{totalAttackPower}</span></div>
+                  <div>GROUP DEF: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{totalDefensePower}</span></div>
+                  
+                  {multiSelectedIds.length > 1 && (
+                    <div style={{ 
+                      fontWeight: 'bold', 
+                      marginTop: '2px',
+                      color: isSelectionConnected(multiSelectedIds) 
+                        ? (stackOrientation ? '#10b981' : '#002fa7') 
+                        : '#991b1b' 
+                    }}>
+                      {isSelectionConnected(multiSelectedIds) 
+                        ? (stackOrientation ? "✓ ALIGNED STACK (COMBINED FIRE)" : "✓ CONNECTED SHAPE GROUP") 
+                        : "✗ DISCONNECTED GROUP"
+                      }
+                    </div>
+                  )}
+                </div>
 
-              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>STACKING (X + click)</div>
-              <div style={{ color: '#cbd5e1' }}>Line up 2+ units in a row → attack from the <em>entire line</em>. Combined ATK = sum of all stacked units. Range extends along the stack axis.</div>
-
-              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>COMBAT RESULTS</div>
-              <div>✅ <span style={{ color: '#10b981' }}>DESTROY</span> — combined ATK {'>'} DEF</div>
-              <div>↩ <span style={{ color: '#f59e0b' }}>RETREAT</span> — ATK ≈ DEF (push back)</div>
-              <div>✗ <span style={{ color: '#ef4444' }}>FAIL</span>   — ATK {'<'} DEF</div>
-
-              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>LINES OF COMM (LoC)</div>
-              <div style={{ color: '#cbd5e1' }}>Units <em>off</em> LoC are cut off: ATK→0, DEF halved (💀 easy targets). Relays extend your LoC grid. Enemy on your Arsenal = total LoC collapse.</div>
-
-              <div style={{ color: '#f59e0b', fontWeight: 'bold', marginTop: '6px', marginBottom: '3px' }}>WIN CONDITIONS</div>
-              <div>⚔ Annihilate all enemy units</div>
-              <div>🏛 Occupy <em>both</em> enemy arsenals</div>
-            </div>
-          )}
-
-          {!showRules && (
-            <div style={{ fontSize: '9px', color: '#475569', lineHeight: '1.3' }}>
-              Objective: Sever enemy networks and target communication structures. Cut-off entities suffer extreme defensive penalties.
-            </div>
-          )}
+                {hoveredUnit && hoveredUnit.side !== turn && (
+                  <div style={{ marginTop: '6px', paddingTop: '4px', borderTop: '1px solid #cbd5e1', fontSize: '9px' }}>
+                    <div style={{ fontWeight: 'bold', color: hoveredUnit.side === 'North' ? '#002fa7' : '#991b1b', marginBottom: '2px' }}>
+                      TARGET: {hoveredStats.label} [{hoveredUnit.symbol}] (DEF: {hoveredStats.currentDefense})
+                    </div>
+                    <div style={{ fontWeight: 'bold' }}>
+                      {totalAttackPower - hoveredStats.currentDefense >= 2 ? (
+                        <span style={{ color: '#10b981' }}>✓ DESTROY CONFIRMED</span>
+                      ) : totalAttackPower - hoveredStats.currentDefense === 1 ? (
+                        <span style={{ color: '#f59e0b' }}>↩ PUSH TO RETREAT</span>
+                      ) : (
+                        <span style={{ color: '#ef4444' }}>✗ ATTACK REPELLED</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : hoveredUnit ? (
+              <div>
+                <div style={{ color: hoveredUnit.side === 'North' ? '#002fa7' : '#991b1b', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>
+                  {hoveredStats.label} [{hoveredUnit.symbol}]
+                </div>
+                <div style={{ fontSize: '10px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <div>ATK: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{hoveredStats.attack}</span></div>
+                  <div>DEF: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{hoveredStats.currentDefense}</span></div>
+                  <div style={{ color: hoveredStats.isConnected ? '#002fa7' : '#991b1b', fontWeight: 'bold', marginTop: '2px' }}>
+                    {hoveredStats.isConnected ? "✓ SUPPLY CONNECTED" : "✗ OUT OF SUPPLY"}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: '#64748b', fontStyle: 'italic', fontSize: '10px' }}>Radar scanning... Hover over a division to analyze telemetry.</div>
+            )}
+          </div>
         </div>
 
         {/* INTERACTIVE WAR MAP GRID */}
-        <div ref={gridRef} style={styles.gridContainer}>
+        <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1 }}>
+          {/* Top column numbers (0 to 24) */}
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+            <div style={{ width: '24px', minWidth: '24px' }} /> {/* Spacer matching left column width */}
+            <div style={{
+              flexGrow: 1,
+              display: 'grid',
+              gridTemplateColumns: 'repeat(25, minmax(0, 1fr))',
+              gap: '1px',
+              padding: '0 8px',
+              boxSizing: 'border-box'
+            }}>
+              {Array.from({ length: 25 }).map((_, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'center', fontSize: '9px', color: '#002fa7', opacity: 0.4, fontWeight: 'bold' }}>
+                  {i}
+                </div>
+              ))}
+            </div>
+          </div>
 
-          {/* Animated projectile dots */}
-          {tracers.map(t => (
-            <div
-              key={t.id}
-              className="projectile-dot"
-              style={{
-                width: `${t.size}px`,
-                height: `${t.size}px`,
-                backgroundColor: t.color,
-                boxShadow: `0 0 8px ${t.color}, 0 0 3px #fff`,
-                '--px0': `${t.x1}px`,
-                '--py0': `${t.y1}px`,
-                '--px1': `${t.x2}px`,
-                '--py1': `${t.y2}px`,
-                '--dur': t.dur
-              }}
-            />
-          ))}
+          {/* Row numbers and Grid */}
+          <div style={{ display: 'flex', flexGrow: 1, alignItems: 'stretch' }}>
+            {/* Left row numbers (0 to 19) */}
+            <div style={{
+              width: '24px',
+              minWidth: '24px',
+              display: 'grid',
+              gridTemplateRows: 'repeat(20, minmax(0, 1fr))',
+              gap: '1px',
+              padding: '8px 0',
+              boxSizing: 'border-box',
+              alignItems: 'center'
+            }}>
+              {Array.from({ length: 20 }).map((_, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'center', fontSize: '9px', color: '#002fa7', opacity: 0.4, fontWeight: 'bold' }}>
+                  {i}
+                </div>
+              ))}
+            </div>
 
-          {cells.map(({ x, y, terrain, occupyingUnit, isNorthLoc, isSouthLoc }) => {
-            const isSelected = occupyingUnit && occupyingUnit.id === selectedUnitId;
-            const isMultiSelected = occupyingUnit && multiSelectedIds.includes(occupyingUnit.id);
-            const isUnitConnected = occupyingUnit && connectedUnitIds.includes(occupyingUnit.id);
-            const inRange = isEnemyInAttackRange(x, y);
-            const tileKey = `${x},${y}`;
-            const hasResidue = graveyardTiles[tileKey] > 0;
-            const isFlashing = killFlash && killFlash.x === x && killFlash.y === y;
-            const isRepelling = repelFlash && repelFlash.x === x && repelFlash.y === y;
+            {/* Grid Container */}
+            <div ref={gridRef} style={styles.gridContainer}>
+              {/* Animated projectile dots */}
+              {tracers.map(t => (
+                <div
+                  key={t.id}
+                  className="projectile-dot"
+                  style={{
+                    width: `${t.size}px`,
+                    height: `${t.size}px`,
+                    backgroundColor: t.color,
+                    boxShadow: `0 0 8px ${t.color}, 0 0 3px #fff`,
+                    '--px0': `${t.x1}px`,
+                    '--py0': `${t.y1}px`,
+                    '--px1': `${t.x2}px`,
+                    '--py1': `${t.y2}px`,
+                    '--dur': t.dur
+                  }}
+                />
+              ))}
 
-            let stackOutline = 'none';
-            if (isSelected) stackOutline = '3px solid #eab308';
-            else if (isMultiSelected) {
-              stackOutline = stackOrientation ? '3px solid #06b6d4' : '2px dashed #64748b';
-            }
+              {cells.map(({ x, y, terrain, occupyingUnit, isNorthLoc, isSouthLoc }) => {
+                const isSelected = occupyingUnit && occupyingUnit.id === selectedUnitId;
+                const isMultiSelected = occupyingUnit && multiSelectedIds.includes(occupyingUnit.id);
+                const isUnitConnected = occupyingUnit && connectedUnitIds.includes(occupyingUnit.id);
+                const inRange = isEnemyInAttackRange(x, y);
+                const tileKey = `${x},${y}`;
+                const residue = graveyardTiles[tileKey];
+                const hasResidue = residue && residue.count > 0;
+                const isFlashing = killFlash && killFlash.x === x && killFlash.y === y;
+                const isRepelling = repelFlash && repelFlash.x === x && repelFlash.y === y;
 
-            return (
-              <div
-                key={`${x}-${y}`}
-                data-coord={tileKey}
-                onClick={() => handleCellClick(x, y)}
-                onMouseEnter={() => setHoveredCell({ x, y })}
-                onMouseLeave={() => setHoveredCell(null)}
-                style={{
-                  ...styles.cell,
-                  backgroundColor: inRange ? 'rgba(220, 38, 38, 0.45)' : terrain.color,
-                  border: inRange ? '1px solid #ef4444' : (terrain.border || '1px solid #1f2937'),
-                  outline: stackOutline,
-                  boxShadow: inRange ? 'inset 0 0 10px rgba(239, 68, 68, 0.4)' : 'none',
-                  zIndex: (isSelected || isMultiSelected) ? 10 : 1,
-                  cursor: isMyTurn ? 'pointer' : 'default'
-                }}
-              >
-                {/* Kill flash bloom */}
-                {isFlashing && <div className="kill-flash" />}
-                {isRepelling && <div className={repelFlash.result === "RETREAT" ? "repel-flash-amber" : "repel-flash-blue"} />}
+                let cellClass = "";
+                if (isSelected) {
+                  cellClass = "cell-selected-active";
+                } else if (isMultiSelected) {
+                  cellClass = stackOrientation ? "cell-selected-multi-stack" : "cell-selected-multi-shape";
+                }
 
-                {/* Skull on graveyard tile (behind live unit if reoccupied) */}
-                {hasResidue && <span className="skull-marker">💀</span>}
+                return (
+                  <div
+                    key={`${x}-${y}`}
+                    data-coord={tileKey}
+                    className={cellClass}
+                    onClick={() => handleCellClick(x, y)}
+                    onMouseEnter={() => setHoveredCell({ x, y })}
+                    onMouseLeave={() => setHoveredCell(null)}
+                    style={{
+                      ...styles.cell,
+                      backgroundColor: inRange ? 'rgba(153, 27, 27, 0.2)' : terrain.color,
+                      border: inRange ? '1px solid #991b1b' : (terrain.border || '1px solid #cbd5e1'),
+                      boxShadow: inRange ? 'inset 0 0 10px rgba(153, 27, 27, 0.15)' : 'none',
+                      cursor: isMyTurn ? 'pointer' : 'default'
+                    }}
+                  >
+                    {/* Kill flash bloom */}
+                    {isFlashing && <div className="kill-flash" />}
+                    {isRepelling && <div className={repelFlash.result === "RETREAT" ? "repel-flash-amber" : "repel-flash-blue"} />}
 
-                {!occupyingUnit && (isNorthLoc || isSouthLoc) && (
-                  <div style={{ ...styles.locDot, backgroundColor: isNorthLoc && isSouthLoc ? '#a855f7' : isNorthLoc ? '#3b82f6' : '#ef4444' }} />
-                )}
+                    {/* Skull on graveyard tile (behind live unit if reoccupied) */}
+                    {hasResidue && (
+                      <span 
+                        className="skull-marker" 
+                        style={{ 
+                          filter: residue.side === 'North' 
+                            ? 'drop-shadow(0 0 3px #002fa7) sepia(100%) hue-rotate(190deg) saturate(300%)' 
+                            : 'drop-shadow(0 0 3px #991b1b) sepia(100%) hue-rotate(330deg) saturate(300%)' 
+                        }}
+                      >
+                        💀
+                      </span>
+                    )}
 
-                {occupyingUnit ? (
-                  <div style={{
-                    ...styles.unitBadge,
-                    borderColor: occupyingUnit.side === 'North' ? '#3b82f6' : '#ef4444',
-                    color: occupyingUnit.side === 'North' ? '#60a5fa' : '#f87171',
-                    opacity: isUnitConnected ? 1 : 0.4
-                  }}>
-                    {occupyingUnit.symbol}
+                    {!occupyingUnit && (isNorthLoc || isSouthLoc) && (
+                      <div style={{ ...styles.locDot, backgroundColor: isNorthLoc && isSouthLoc ? '#6b21a8' : isNorthLoc ? '#002fa7' : '#991b1b' }} />
+                    )}
+
+                    {occupyingUnit ? (
+                      <div style={{
+                        ...styles.unitBadge,
+                        backgroundColor: occupyingUnit.side === 'North' ? '#002fa7' : '#991b1b',
+                        borderColor: occupyingUnit.side === 'North' ? '#002fa7' : '#991b1b',
+                        color: '#ffffff',
+                        opacity: isUnitConnected ? 1 : 0.35
+                      }}>
+                        {occupyingUnit.symbol}
+                      </div>
+                    ) : (
+                      <span style={{ ...styles.terrainLabel, color: '#002fa7', opacity: 0.3 }}>{terrain.label}</span>
+                    )}
                   </div>
-                ) : (
-                  <span style={styles.terrainLabel}>{terrain.label}</span>
-                )}
-                <span style={styles.coords}>{x},{y}</span>
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          </div>
         </div>
       </div>
-
-      {/* FLOATING HUD OVERLAY PANEL */}
-      <div style={styles.floatingHud}>
-        <div style={{ fontWeight: 'bold', color: '#38bdf8', marginBottom: '4px', fontSize: '10px' }}>🛰️ RADAR INTEL</div>
-
-        {activeAttackers.length > 0 && (
-          <div style={{ borderBottom: '1px solid #334155', paddingBottom: '4px', marginBottom: '4px' }}>
-            <span style={{ color: '#64748b' }}>STACK ATK:</span> <span style={{ color: '#06b6d4', fontWeight: 'bold' }}>{totalAttackPower}</span>
-            {stackOrientation && <span style={{ color: '#10b981', fontSize: '8px', marginLeft: '6px' }}>[LOCKED LINK]</span>}
+      {/* RULES BOOK MODAL OVERLAY */}
+      {showRules && (
+        <div 
+          onClick={() => setShowRules(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 47, 167, 0.4)',
+            backdropFilter: 'blur(3px)',
+            zIndex: 1000,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: '20px'
+          }}
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              backgroundColor: '#ffffff',
+              border: '2px solid #002fa7',
+              borderRadius: '8px',
+              padding: '30px',
+              maxWidth: '640px',
+              width: '100%',
+              maxHeight: '85vh',
+              overflowY: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+              position: 'relative',
+              boxShadow: '0 8px 30px rgba(0, 47, 167, 0.2)',
+              textAlign: 'left'
+            }}
+          >
+            <button 
+              onClick={() => setShowRules(false)}
+              style={{
+                position: 'absolute',
+                top: '16px',
+                right: '16px',
+                border: '1px solid #002fa7',
+                background: 'transparent',
+                color: '#002fa7',
+                cursor: 'pointer',
+                padding: '4px 10px',
+                fontSize: '10px',
+                fontWeight: 'bold',
+                fontFamily: 'monospace',
+                borderRadius: '4px'
+              }}
+            >
+              CLOSE
+            </button>
+            <h2 style={{ fontSize: '14px', letterSpacing: '2px', color: '#002fa7', margin: '0 0 8px 0', borderBottom: '2px solid #002fa7', paddingBottom: '6px', fontWeight: 'bold' }}>
+              TACTICAL FIELD MANUAL (RULES)
+            </h2>
+            <RulesBook />
           </div>
-        )}
-
-        {hoveredUnit ? (
-          <div>
-            <div style={{ color: hoveredUnit.side === 'North' ? '#60a5fa' : '#f87171', fontWeight: 'bold' }}>
-              {hoveredStats.label} [{hoveredUnit.symbol}]
-            </div>
-            <div style={{ fontSize: '9px', color: '#94a3b8' }}>
-              ATK: <span style={{ color: '#f8fafc', marginRight: '6px' }}>{hoveredStats.attack}</span>
-              DEF: <span style={{ color: '#f8fafc' }}>{hoveredStats.currentDefense}</span>
-              <div style={{ color: hoveredStats.isConnected ? '#38bdf8' : '#ef4444', marginTop: '1px' }}>
-                ({hoveredStats.isConnected ? "Linked Network" : "MUTED / CUT-OFF"})
-              </div>
-            </div>
-            {totalAttackPower > 0 && hoveredUnit.side !== turn && (
-              <div style={{ marginTop: '2px', fontWeight: 'bold', fontSize: '9px' }}>
-                {!isEnemyInAttackRange(hoveredCell.x, hoveredCell.y) ? (
-                  <span style={{ color: '#94a3b8' }}>✗ TARGET OUT OF RANGE</span>
-                ) : totalAttackPower - hoveredStats.currentDefense >= 10 ? (
-                  <span style={{ color: '#10b981' }}>✓ DESTROY CONFIRMED</span>
-                ) : totalAttackPower - hoveredStats.currentDefense === 5 ? (
-                  <span style={{ color: '#eab308' }}>↩ PUSH TO RETREAT</span>
-                ) : (
-                  <span style={{ color: '#ef4444' }}>✗ REPELLED</span>
-                )}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div style={{ color: '#475569', fontStyle: 'italic' }}>Radar idle.</div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
 
 const styles = {
-  container: { backgroundColor: '#020617', minHeight: '100vh', color: '#f3f4f6', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '16px' },
-  lobbyCard: { backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '6px', padding: '30px', width: '100%', maxWidth: '400px', marginTop: '100px' },
-  lobbyTitle: { fontSize: '20px', letterSpacing: '2px', textAlign: 'center', margin: '0 0 4px 0', color: '#ffffff' },
-  lobbySubtitle: { fontSize: '10px', color: '#ffffff', textAlign: 'center', margin: '0 0 16px 0' },
-  toggleContainer: { display: 'flex', backgroundColor: '#020617', border: '1px solid #334155', borderRadius: '4px', padding: '2px', marginBottom: '16px' },
+  container: { backgroundColor: '#fdfbe6', minHeight: '100vh', color: '#002fa7', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '16px' },
+  lobbyCard: { backgroundColor: '#ffffff', border: '1px solid #002fa7', borderRadius: '6px', padding: '30px', width: '100%', maxWidth: '400px', marginTop: '100px' },
+  lobbyTitle: { fontSize: '20px', letterSpacing: '2px', textAlign: 'center', margin: '0 0 4px 0', color: '#002fa7' },
+  lobbySubtitle: { fontSize: '10px', color: '#002fa7', textAlign: 'center', margin: '0 0 16px 0' },
+  toggleContainer: { display: 'flex', backgroundColor: '#fdfbe6', border: '1px solid #002fa7', borderRadius: '4px', padding: '2px', marginBottom: '16px' },
   toggleBtn: { flex: 1, border: 'none', padding: '8px', fontSize: '10px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer' },
-  lobbyError: { backgroundColor: '#7f1d1d', color: '#fca5a5', padding: '8px', borderRadius: '4px', fontSize: '11px', marginBottom: '12px' },
+  lobbyError: { backgroundColor: '#fee2e2', color: '#b91c1c', padding: '8px', borderRadius: '4px', fontSize: '11px', marginBottom: '12px' },
   form: { display: 'flex', flexDirection: 'column', gap: '14px' },
   inputGroup: { display: 'flex', flexDirection: 'column', gap: '4px' },
-  label: { fontSize: '9px', color: '#94a3b8', fontWeight: 'bold' },
-  input: { backgroundColor: '#020617', border: '1px solid #334155', borderRadius: '4px', color: '#f8fafc', padding: '8px 12px', fontSize: '12px', fontFamily: 'monospace', outline: 'none' },
-  lobbyButton: { backgroundColor: '#1e293b', border: '1px solid #475569', color: '#38bdf8', padding: '10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' },
+  label: { fontSize: '9px', color: '#002fa7', fontWeight: 'bold' },
+  input: { backgroundColor: '#fdfbe6', border: '1px solid #002fa7', borderRadius: '4px', color: '#002fa7', padding: '8px 12px', fontSize: '12px', fontFamily: 'monospace', outline: 'none' },
+  lobbyButton: { backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', padding: '10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' },
 
   // Hard height thresholds to lock UI jumping
-  header: { width: '100%', maxWidth: '1280px', height: '62px', minHeight: '62px', maxHeight: '62px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid #334155', paddingBottom: '12px', gap: '12px', boxSizing: 'border-box' },
+  header: { width: '100%', maxWidth: '1280px', height: '62px', minHeight: '62px', maxHeight: '62px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid #002fa7', paddingBottom: '12px', gap: '12px', boxSizing: 'border-box' },
   headerTitleSection: { display: 'flex', flexDirection: 'column' },
-  title: { fontSize: '18px', letterSpacing: '2px', color: '#f1f5f9', margin: 0, lineHeight: '1' },
-  sharePanel: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px', fontSize: '10px' },
-  linkInput: { backgroundColor: '#0f172a', border: '1px solid #334155', color: '#38bdf8', padding: '2px 6px', borderRadius: '4px', width: '150px', fontSize: '10px', outline: 'none' },
+  title: { fontSize: '18px', letterSpacing: '2px', color: '#002fa7', margin: 0, lineHeight: '1', fontWeight: 'bold' },
+  sharePanel: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px', fontSize: '10px', color: '#002fa7' },
+  linkInput: { backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', padding: '2px 6px', borderRadius: '4px', width: '150px', fontSize: '10px', outline: 'none' },
   identityPanel: { display: 'flex', gap: '8px', alignItems: 'center' },
-  playerTag: { display: 'flex', flexDirection: 'column', backgroundColor: '#0f172a', border: '1px solid', borderRadius: '4px', padding: '4px 10px', minWidth: '100px', height: '38px', boxSizing: 'border-box', justifyContent: 'center' },
+  playerTag: { display: 'flex', flexDirection: 'column', backgroundColor: '#ffffff', border: '1px solid', borderRadius: '4px', padding: '4px 10px', minWidth: '100px', height: '38px', boxSizing: 'border-box', justifyContent: 'center' },
   controlPanel: { display: 'flex', gap: '8px', alignItems: 'center' },
 
   // Fixed button formatting dimensions
-  fixedBtn: { backgroundColor: '#0f172a', border: '1px solid #334155', color: '#f8fafc', width: '80px', height: '34px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
-  statusBadge: { backgroundColor: '#0f172a', border: '1px solid', width: '150px', height: '34px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', whiteSpace: 'nowrap' },
-  metricsBadge: { backgroundColor: '#0f172a', border: '1px solid #334155', width: '110px', height: '34px', borderRadius: '4px', fontSize: '11px', color: '#94a3b8', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', whiteSpace: 'nowrap' },
-  HighlightText: { color: '#f59e0b', fontWeight: 'bold' },
-  endTurnButton: { backgroundColor: '#1e293b', border: '1px solid #64748b', color: '#f8fafc', width: '95px', height: '34px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+  fixedBtn: { backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', width: '80px', height: '34px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+  statusBadge: { backgroundColor: '#ffffff', border: '1px solid', width: '150px', height: '34px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', whiteSpace: 'nowrap' },
+  metricsBadge: { backgroundColor: '#ffffff', border: '1px solid #002fa7', width: '110px', height: '34px', borderRadius: '4px', fontSize: '11px', color: '#002fa7', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', whiteSpace: 'nowrap' },
+  HighlightText: { color: '#002fa7', fontWeight: 'bold' },
+  endTurnButton: { backgroundColor: '#002fa7', border: '1px solid #002fa7', color: '#ffffff', width: '95px', height: '34px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
 
-  errorAlert: { width: '100%', maxWidth: '1280px', border: '1px solid', color: '#f8fafc', padding: '8px 12px', borderRadius: '4px', marginBottom: '10px', fontSize: '12px', boxSizing: 'border-box' },
-  waitingBanner: { width: '100%', maxWidth: '1280px', backgroundColor: '#1c1917', border: '1px solid #44403c', color: '#a8a29e', padding: '6px', borderRadius: '4px', marginBottom: '10px', fontSize: '11px', textAlign: 'center', boxSizing: 'border-box' },
+  errorAlert: { width: '100%', maxWidth: '1280px', border: '1px solid', color: '#b91c1c', padding: '8px 12px', borderRadius: '4px', marginBottom: '10px', fontSize: '12px', boxSizing: 'border-box' },
+  waitingBanner: { width: '100%', maxWidth: '1280px', backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', padding: '6px', borderRadius: '4px', marginBottom: '10px', fontSize: '11px', textAlign: 'center', boxSizing: 'border-box' },
 
   // Split view design linking grid layout and sidebar status tracking
   workspaceLayout: { display: 'flex', width: '100%', maxWidth: '1280px', gap: '16px', alignItems: 'flex-start' },
-  sidebarPanel: { width: '240px', minWidth: '240px', backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '6px', padding: '14px', boxSizing: 'border-box' },
-  sidebarDivider: { height: '1px', backgroundColor: '#334155', width: '100%', margin: '8px 0' },
+  sidebarPanel: { width: '240px', minWidth: '240px', backgroundColor: '#ffffff', border: '1px solid #002fa7', borderRadius: '6px', padding: '14px', boxSizing: 'border-box', color: '#002fa7' },
+  sidebarDivider: { height: '1px', backgroundColor: '#002fa7', width: '100%', margin: '8px 0' },
   factionStatsBlock: { display: 'flex', flexDirection: 'column' },
   statRow: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginTop: '4px' },
-  statLabel: { color: '#64748b' },
+  statLabel: { color: '#475569' },
 
-  gridContainer: { position: 'relative', flexGrow: 1, display: 'grid', gridTemplateColumns: 'repeat(25, minmax(0, 1fr))', gap: '2px', backgroundColor: '#0f172a', padding: '8px', borderRadius: '6px', border: '1px solid #1e293b' },
+  gridContainer: { position: 'relative', flexGrow: 1, display: 'grid', gridTemplateColumns: 'repeat(25, minmax(0, 1fr))', gap: '1px', backgroundColor: '#002fa7', padding: '8px', borderRadius: '6px', border: '1px solid #002fa7' },
   cell: { position: 'relative', aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none', transition: 'background-color 0.15s ease' },
-  unitBadge: { width: '80%', height: '80%', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '3px', border: '2px solid', fontWeight: 'bold', fontSize: '12px', backgroundColor: '#020617', zIndex: 2 },
+  unitBadge: { width: '80%', height: '80%', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '3px', border: '2px solid', fontWeight: 'bold', fontSize: '12px', zIndex: 2 },
   locDot: { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: '6px', height: '6px', borderRadius: '50%', zIndex: 1, opacity: 0.8 },
   terrainLabel: { fontSize: '9px', opacity: 0.2 },
-  coords: { position: 'absolute', bottom: '1px', right: '1px', fontSize: '4px', color: '#334155', opacity: 0.3 },
+  coords: { position: 'absolute', bottom: '1px', right: '1px', fontSize: '4.5px', color: '#002fa7', opacity: 0.3 },
 
-  floatingHud: { position: 'fixed', bottom: '16px', right: '16px', backgroundColor: 'rgba(15, 23, 42, 0.85)', backdropFilter: 'blur(6px)', border: '1px solid #334155', borderRadius: '6px', padding: '10px', width: '180px', fontSize: '10px', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }
+  floatingHud: { position: 'fixed', bottom: '16px', right: '16px', backgroundColor: 'rgba(255, 255, 255, 0.95)', border: '1px solid #002fa7', color: '#002fa7', borderRadius: '6px', padding: '10px', width: '180px', fontSize: '10px', zIndex: 100, boxShadow: '0 4px 12px rgba(0,2,200,0.1)' }
 };

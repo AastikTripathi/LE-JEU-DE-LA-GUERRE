@@ -396,6 +396,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 is_valid, reason = engine.validate_move(st["units"], unit_id, tx, ty, st["moved_units_this_turn"])
                 if is_valid:
                     save_state_to_history(room_id)  # Log history frame
+                    print(f"[MOVE] Success: ID={unit_id} to ({tx},{ty}) in room={room_id}. History size now: {len(room['history'])}")
                     for u in st["units"]:
                         if u["id"] == unit_id:
                             u["x"], u["y"] = tx, ty
@@ -403,6 +404,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     st["moved_units_this_turn"].append(unit_id)
                     await broadcast_room_state(room_id)
                 else:
+                    print(f"[MOVE] Refused: ID={unit_id} to ({tx},{ty}) in room={room_id} because: {reason}")
                     await websocket.send_json({"type": "error", "message": reason})
 
             elif action == "attack":
@@ -413,31 +415,12 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 tx, ty = data.get("x"), data.get("y")
                 combat = engine.calculate_combat(st["units"], st["turn"], tx, ty)
 
-            #     if combat.get("valid"):
-            #         save_state_to_history(room_id)  # Log history frame
-            #         res = combat["result"]
-            #         if res == "DESTROY":
-            #             st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
-            #             msg = "Strike Success! Unit eliminated."
-            #         else:
-            #             msg = "Attack repelled."
-            #
-            #         st["attack_executed_this_turn"] = True
-            #         await broadcast_room_state(room_id)
-            #         await websocket.send_json({"type": "error", "message": msg})
-            #     else:
-            #         await websocket.send_json({"type": "error", "message": combat["reason"]})
-            #
-            # elif action == "undo":
-            #     if room["history"]:
-            #         room["state"] = room["history"].pop()  # Pop last state snapshot
-            #         await broadcast_room_state(room_id)
-
                 if combat.get("valid"):
                     save_state_to_history(room_id)  # Log history frame
                     res = combat["result"]
                     attacker_unit = next((u for u in st["units"] if u["side"] == st["turn"] and
                                           abs(u["x"] - tx) <= 3 and abs(u["y"] - ty) <= 3), None)
+                    print(f"[ATTACK] Success: target=({tx},{ty}) result={res} in room={room_id}. History size now: {len(room['history'])}")
                     if res == "DESTROY":
                         st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
                         msg = "Strike Success! Unit eliminated."
@@ -452,6 +435,17 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     st["attack_executed_this_turn"] = True
                     await broadcast_room_state(room_id)
                 else:
+                    print(f"[ATTACK] Refused: target=({tx},{ty}) in room={room_id} because: {combat.get('reason')}")
+                    await websocket.send_json({"type": "error", "message": combat.get("reason", "Invalid attack target.")})
+
+            elif action == "undo":
+                if room["history"]:
+                    old_state = room["history"].pop()
+                    print(f"[UNDO] Restoring state in room={room_id}. History size remaining: {len(room['history'])}")
+                    room["state"] = old_state
+                    await broadcast_room_state(room_id)
+                else:
+                    print(f"[UNDO] Refused in room={room_id}: history is empty")
                     await websocket.send_json({"type": "error", "message": "Nothing left to undo."})
 
             elif action == "restart":

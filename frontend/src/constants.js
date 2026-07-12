@@ -27,9 +27,9 @@ export const TERRAIN_MAP = {
 
 export const GET_TERRAIN = (x, y) => {
   const key = `${x},${y}`;
-  if (TERRAIN_MAP.mountains.includes(key)) return { type: 'mountain', label: '▲', color: '#4b5563' };
-  if (TERRAIN_MAP.passes.includes(key)) return { type: 'pass', label: '⚬', color: '#1f2937', border: '2px dashed #6b7280' };
-  if (TERRAIN_MAP.forts.includes(key)) return { type: 'fort', label: '⛊', color: '#b45309' };
-  if (TERRAIN_MAP.arsenals.includes(key)) return { type: 'arsenal', label: '★', color: '#111827', border: '2px solid #3b82f6' };
-  return { type: 'plain', label: '', color: '#111827' };
+  if (TERRAIN_MAP.mountains.includes(key)) return { type: 'mountain', label: '▲', color: '#b9b7a4', border: '1px solid #002fa7' };
+  if (TERRAIN_MAP.passes.includes(key)) return { type: 'pass', label: '⚬', color: '#e5e3c9', border: '2px dashed #002fa7' };
+  if (TERRAIN_MAP.forts.includes(key)) return { type: 'fort', label: '⛊', color: '#d4af37', border: '1px solid #002fa7' };
+  if (TERRAIN_MAP.arsenals.includes(key)) return { type: 'arsenal', label: '★', color: '#fffec2', border: '2px solid #002fa7' };
+  return { type: 'plain', label: '', color: '#ffffff', border: '1px solid #cbd5e1' };
 };
