@@ -166,30 +166,37 @@ class GameEngine:
 
     def check_line_of_sight(self, from_x: int, from_y: int, to_x: int, to_y: int, max_range: int,
                             units: List[Dict]) -> bool:
-        dx = to_x - from_x
-        dy = to_y - from_y
-
-        if dx != 0 and dy != 0 and abs(dx) != abs(dy):
+        distance = max(abs(to_x - from_x), abs(to_y - from_y))
+        if distance > max_range or distance == 0:
             return False
 
-        steps = max(abs(dx), abs(dy))
-        if steps > max_range or steps == 0:
-            return False
+        # Bresenham's Line Algorithm to find all cells between (from_x, from_y) and (to_x, to_y)
+        x0, y0 = from_x, from_y
+        x1, y1 = to_x, to_y
+        
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
 
-        step_x = 0 if dx == 0 else dx // abs(dx)
-        step_y = 0 if dy == 0 else dy // abs(dy)
-
-        cx, cy = from_x + step_x, from_y + step_y
-        for _ in range(steps - 1):
-            # Absolute barrier check: Mountains block all combat fire/support lines
-            if (cx, cy) in self.mountains:
-                return False
-
-            # REMOVED: "if any(u['x'] == cx ...)"
-            # Units do not block ballistic lines of fire or communication in the official rules.
-
-            cx += step_x
-            cy += step_y
+        cx, cy = x0, y0
+        while True:
+            # Do not check the start or end cell itself
+            if (cx, cy) != (x0, y0) and (cx, cy) != (x1, y1):
+                if (cx, cy) in self.mountains:
+                    return False
+            
+            if cx == x1 and cy == y1:
+                break
+                
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                cx += sx
+            if e2 < dx:
+                err += dx
+                cy += sy
 
         return True
 
@@ -206,8 +213,35 @@ class GameEngine:
         if any(u['x'] == target_x and u['y'] == target_y for u in units): return False, "Tile occupied."
 
         stats = self.get_stats(moving_unit['type'])
-        distance = max(abs(target_x - moving_unit['x']), abs(target_y - moving_unit['y']))
-        if distance > stats['speed']: return False, "Target exceeds physical unit movement rules."
+        
+        # BFS Pathfinding: verify there is a path of length <= speed that does not traverse mountain range cells
+        start_x, start_y = moving_unit['x'], moving_unit['y']
+        queue = [(start_x, start_y, 0)]
+        visited = {(start_x, start_y)}
+        path_found = False
+        
+        while queue:
+            cx, cy, dist = queue.pop(0)
+            if cx == target_x and cy == target_y:
+                if dist <= stats['speed']:
+                    path_found = True
+                    break
+            
+            if dist >= stats['speed']:
+                continue
+                
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = cx + dx, cy + dy
+                    if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        if (nx, ny) not in self.mountains and (nx, ny) not in visited:
+                            visited.add((nx, ny))
+                            queue.append((nx, ny, dist + 1))
+                            
+        if not path_found:
+            return False, "Movement path is blocked by impassable mountains."
 
         return True, "Move approved."
 
@@ -217,17 +251,52 @@ class GameEngine:
             return {"valid": False, "reason": "No valid enemy target located on those coordinates."}
 
         total_offense = 0
+        contributing_units = set()
+
+        # Scan 8 directions from target to find aligned unit stacks
+        for dx, dy in self.directions:
+            line_friendlies = []
+            cx, cy = target_x + dx, target_y + dy
+            while 0 <= cx < self.cols and 0 <= cy < self.rows:
+                if (cx, cy) in self.mountains:
+                    break
+                
+                u = next((unit for unit in units if unit['x'] == cx and unit['y'] == cy), None)
+                if u:
+                    if u['side'] == attacker_side:
+                        line_friendlies.append(u)
+                    else:
+                        break
+                else:
+                    if line_friendlies:
+                        if len(line_friendlies) >= 2:
+                            for lf in line_friendlies:
+                                contributing_units.add(lf['id'])
+                        line_friendlies = []
+                cx += dx
+                cy += dy
+            if len(line_friendlies) >= 2:
+                for lf in line_friendlies:
+                    contributing_units.add(lf['id'])
+
+        # Add single units that have line of sight within their base range
         for u in units:
             if u['side'] == attacker_side:
                 stats = self.get_stats(u['type'])
                 if self.check_line_of_sight(u['x'], u['y'], target_x, target_y, stats['range'], units):
-                    is_adjacent = max(abs(u['x'] - target_x), abs(u['y'] - target_y)) == 1
-                    is_fortified = (target_x, target_y) in self.fortresses or (target_x, target_y) in self.passes
+                    contributing_units.add(u['id'])
 
-                    if "cavalry" in u['type'].lower() and is_adjacent and not is_fortified:
-                        total_offense += stats['charge']
-                    else:
-                        total_offense += stats['offense']
+        # Sum total offense of contributing units
+        for u_id in contributing_units:
+            u = next(unit for unit in units if unit['id'] == u_id)
+            stats = self.get_stats(u['type'])
+            is_adjacent = max(abs(u['x'] - target_x), abs(u['y'] - target_y)) == 1
+            is_fortified = (target_x, target_y) in self.fortresses or (target_x, target_y) in self.passes
+
+            if "cavalry" in u['type'].lower() and is_adjacent and not is_fortified:
+                total_offense += stats['charge']
+            else:
+                total_offense += stats['offense']
 
         target_stats = self.get_stats(target_unit['type'])
         total_defense = target_stats['defense']
@@ -237,11 +306,50 @@ class GameEngine:
         elif (target_x, target_y) in self.passes:
             total_defense += 2
 
+        contributing_defenders = set()
+
+        # Scan 8 directions from target to find aligned defending stacks
+        for dx, dy in self.directions:
+            line_friendlies = []
+            cx, cy = target_x + dx, target_y + dy
+            while 0 <= cx < self.cols and 0 <= cy < self.rows:
+                if (cx, cy) in self.mountains:
+                    break
+                
+                u = next((unit for unit in units if unit['x'] == cx and unit['y'] == cy), None)
+                if u:
+                    if u['side'] == target_unit['side'] and u['id'] != target_unit['id']:
+                        line_friendlies.append(u)
+                    else:
+                        break
+                else:
+                    if line_friendlies:
+                        if len(line_friendlies) >= 2:
+                            for lf in line_friendlies:
+                                contributing_defenders.add(lf['id'])
+                        line_friendlies = []
+                cx += dx
+                cy += dy
+            if len(line_friendlies) >= 2:
+                for lf in line_friendlies:
+                    contributing_defenders.add(lf['id'])
+
+        # Add single units that have line of sight within their base range
         for u in units:
             if u['side'] == target_unit['side'] and u['id'] != target_unit['id']:
                 stats = self.get_stats(u['type'])
                 if self.check_line_of_sight(u['x'], u['y'], target_x, target_y, stats['range'], units):
-                    total_defense += stats['defense']
+                    contributing_defenders.add(u['id'])
+
+        # Sum defense support
+        for u_id in contributing_defenders:
+            u = next(unit for unit in units if unit['id'] == u_id)
+            stats = self.get_stats(u['type'])
+            total_defense += stats['defense']
+
+        # Double entire defense (base + support) if in a fortress or mountain pass
+        if (target_x, target_y) in self.fortresses or (target_x, target_y) in self.passes:
+            total_defense *= 2
 
         target_connected = target_unit['id'] in self.get_connected_units(units, target_unit['side'])
         if not target_connected:

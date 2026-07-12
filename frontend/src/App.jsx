@@ -787,8 +787,16 @@ export default function App() {
               </div>
             </div>
             {totalAttackPower > 0 && hoveredUnit.side !== turn && (
-              <div style={{ marginTop: '2px', color: totalAttackPower > hoveredStats.currentDefense ? '#10b981' : '#f59e0b', fontWeight: 'bold', fontSize: '9px' }}>
-                {totalAttackPower > hoveredStats.currentDefense ? "✓ BREACH CONFIRMED" : "✗ REPELLED"}
+              <div style={{ marginTop: '2px', fontWeight: 'bold', fontSize: '9px' }}>
+                {!isEnemyInAttackRange(hoveredCell.x, hoveredCell.y) ? (
+                  <span style={{ color: '#94a3b8' }}>✗ TARGET OUT OF RANGE</span>
+                ) : totalAttackPower - hoveredStats.currentDefense >= 10 ? (
+                  <span style={{ color: '#10b981' }}>✓ DESTROY CONFIRMED</span>
+                ) : totalAttackPower - hoveredStats.currentDefense === 5 ? (
+                  <span style={{ color: '#eab308' }}>↩ PUSH TO RETREAT</span>
+                ) : (
+                  <span style={{ color: '#ef4444' }}>✗ REPELLED</span>
+                )}
               </div>
             )}
           </div>

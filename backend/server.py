@@ -109,6 +109,18 @@ def check_win_condition(units: list) -> str | None:
     if south_arsenals.issubset(north_pos):   # North holds both South arsenals
         return "North"
 
+    # Deactivation win condition: if one side has active (connected) units but the other side
+    # has 0 active units (all cut off/deactivated), the active side wins.
+    try:
+        connected_north = engine.get_connected_units(units, "North")
+        connected_south = engine.get_connected_units(units, "South")
+        if north_units and not connected_north and connected_south:
+            return "South"
+        if south_units and not connected_south and connected_north:
+            return "North"
+    except Exception:
+        pass
+
     return None
 
 
@@ -252,6 +264,7 @@ async def run_ai_simulation(room_id: str):
             st["moves_left"] = 5
             st["moved_units_this_turn"] = []
             st["attack_executed_this_turn"] = False
+            st["last_combat"] = None
             await broadcast_room_state(room_id)
 
             # Brief micro-cooldown before next AI takes over
@@ -462,6 +475,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 st["moves_left"] = 5
                 st["moved_units_this_turn"] = []
                 st["attack_executed_this_turn"] = False
+                st["last_combat"] = None
 
                 # Broadcast the shift to South's turn immediately
                 await broadcast_room_state(room_id)
@@ -519,6 +533,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     st["moves_left"] = 5
                     st["moved_units_this_turn"] = []
                     st["attack_executed_this_turn"] = False
+                    st["last_combat"] = None
                     await broadcast_room_state(room_id)
 
     except WebSocketDisconnect:

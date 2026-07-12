@@ -28,6 +28,7 @@ class WarGameAI:
         self.position_history = {}  # Format: {unit_id: [(x1, y1), (x2, y2), ...]}
         self._distance_cache = {}  # {target_y: {(x, y): distance}}
         self.cluster_turn_cursor = 0
+        self.orchestration_data = {}
 
     # def get_path_distance_to_goal(self, x, y, target_y):
     #     """Heuristic: Manhattan distance to the target baseline."""
@@ -60,6 +61,38 @@ class WarGameAI:
             self._distance_cache[target_y] = self._build_distance_map(target_y)
         return self._distance_cache[target_y].get((x, y), 30)
 
+    def _build_point_distance_map(self, target_coords):
+        """Builds a terrain-aware distance map starting from target_coords (tuple (x, y) or list/tuple of tuples)."""
+        from collections import deque
+        dist = {}
+        queue = deque()
+        if isinstance(target_coords, tuple) and len(target_coords) == 2 and isinstance(target_coords[0], int):
+            targets = [target_coords]
+        else:
+            targets = list(target_coords)
+        for tx, ty in targets:
+            if (tx, ty) not in self.engine.mountains:
+                dist[(tx, ty)] = 0
+                queue.append((tx, ty))
+        while queue:
+            cx, cy = queue.popleft()
+            d = dist[(cx, cy)]
+            for dx, dy in self.engine.directions:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < self.engine.cols and 0 <= ny < self.engine.rows:
+                    if (nx, ny) not in self.engine.mountains and (nx, ny) not in dist:
+                        dist[(nx, ny)] = d + 1
+                        queue.append((nx, ny))
+        return dist
+
+    def get_path_distance(self, x, y, target_coords):
+        """Terrain-aware distance to target coordinate(s), via a cached distance map."""
+        key = tuple(target_coords) if isinstance(target_coords, list) else target_coords
+        if key not in self._distance_cache:
+            self._distance_cache[key] = self._build_point_distance_map(target_coords)
+        return self._distance_cache[key].get((x, y), 99)
+
+
     @property
     def enemy_evaluator(self):
         """Lazily constructs a WarGameAI from the enemy's POV for perspective scoring."""
@@ -85,7 +118,7 @@ class WarGameAI:
                     added = False
                     to_remove = []
                     for cand in unvisited:
-                        if any(abs(cand["x"] - c["x"]) + abs(cand["y"] - c["y"]) <= 3 for c in cluster):
+                        if any(max(abs(cand["x"] - c["x"]), abs(cand["y"] - c["y"])) <= 3 for c in cluster):
                             cluster.append(cand)
                             to_remove.append(cand)
                             added = True
@@ -104,70 +137,172 @@ class WarGameAI:
                 })
         return clusters
 
-    def _assign_macro_directives(self, units: list, ai_connected: set, enemy_connected: set):
+    def _orchestrate_tactics(self, units: list, ai_connected: set, enemy_connected: set):
         """
-        DYNAMIC STATE SELECTOR & ARSENAL TARGET EVALUATOR
-        Tracks field compositions, handles uncaptured objectives, and triggers
-        the sweeping ANNIHILATION_HUNT state when sweeping remaining forces.
+        GLOBAL TACTICAL ORCHESTRATOR (The Director/Coach)
+        Performs strategic analysis of the board, computes team mentality,
+        and partitions friendly combat forces into roles (ATTACKER, DEFENDER, REINFORCEMENT).
         """
+        self.orchestration_data.clear()
         self.macro_directives.clear()
         self.target_arsenal_coords = None
 
         ai_units = [u for u in units if u.get("side") == self.side]
         enemy_units = [u for u in units if u.get("side") == self.enemy_side]
 
-        ai_count = len(ai_units)
-        enemy_count = len(enemy_units)
-
-        if ai_count > enemy_count * 1.2 or enemy_count <= 6:
-            self.macro_state = "ANNIHILATION_HUNT"
-        elif enemy_count > ai_count * 1.3 and ai_count <= 6:
-            self.macro_state = "DESPERATION_CHOKE"
-        else:
-            self.macro_state = "STANDARD"
-
+        # 1. Cluster Analysis
         theater = self._analyze_theater_clusters(units)
         enemy_clusters = theater[self.enemy_side]
 
-        open_enemy_arsenals = []
+        # 2. Identify the target coordinates (weakest cluster or cutoff instigator)
+        weakest_cluster = None
+        disconnected_friendly = [u for u in ai_units if u["id"] not in ai_connected]
+        cutoff_instigator = None
+        if disconnected_friendly and enemy_units:
+            min_dist = float('inf')
+            for df in disconnected_friendly:
+                for e in enemy_units:
+                    if "relay" in e.get("type", "").lower():
+                        continue
+                    dist = self.get_path_distance(e["x"], e["y"], (df["x"], df["y"]))
+                    if dist < min_dist:
+                        min_dist = dist
+                        cutoff_instigator = e
+
+        if cutoff_instigator:
+            target_coords = (cutoff_instigator["x"], cutoff_instigator["y"])
+        else:
+            weakest_cluster = None
+            min_weakness_val = float('inf')
+
+            ai_combat_units = [u for u in ai_units if "relay" not in u.get("type", "").lower()]
+            if ai_combat_units:
+                our_cx = sum(u["x"] for u in ai_combat_units) / len(ai_combat_units)
+                our_cy = sum(u["y"] for u in ai_combat_units) / len(ai_combat_units)
+            else:
+                our_cx, our_cy = 12.0, 10.0
+
+            for ec in enemy_clusters:
+                ec_units = ec["units"]
+                ec_combat = [u for u in ec_units if "relay" not in u.get("type", "").lower()]
+                if not ec_combat and len(enemy_units) > len(ec_units):
+                    continue
+                cx, cy = ec["center"]
+                dist_to_us = self.get_path_distance(int(cx), int(cy), (int(our_cx), int(our_cy)))
+                weakness_val = ec["strength"] + (dist_to_us * 15.0)
+                if weakest_cluster is None or weakness_val < min_weakness_val:
+                    min_weakness_val = weakness_val
+                    weakest_cluster = ec
+
+            if not weakest_cluster and enemy_clusters:
+                weakest_cluster = enemy_clusters[0]
+
+            target_coords = weakest_cluster["center"] if weakest_cluster else (12, 10)
+            target_coords = (int(target_coords[0]), int(target_coords[1]))
+
+        # 3. Prized Possession Threat Assessment
+        my_arsenals = self.engine.arsenals[self.side]
+        max_arsenal_threat = 0.0
+        threatened_arsenals = []
+        for ax, ay in my_arsenals:
+            enemy_combat = [e for e in enemy_units if "relay" not in e.get("type", "").lower()]
+            if enemy_combat:
+                closest_enemy_dist = min(self.get_path_distance(e["x"], e["y"], (ax, ay)) for e in enemy_combat)
+                if closest_enemy_dist <= 7:
+                    threat_severity = 8 - closest_enemy_dist
+                    max_arsenal_threat = max(max_arsenal_threat, threat_severity)
+                    threatened_arsenals.append((ax, ay))
+
+        my_relays = [u for u in ai_units if "relay" in u.get("type", "").lower()]
+        threatened_relays = []
+        for relay in my_relays:
+            rx, ry = relay["x"], relay["y"]
+            enemy_combat = [e for e in enemy_units if "relay" not in e.get("type", "").lower()]
+            if enemy_combat:
+                closest_enemy_dist = min(self.get_path_distance(e["x"], e["y"], (rx, ry)) for e in enemy_combat)
+                if closest_enemy_dist <= 5:
+                    threatened_relays.append(relay["id"])
+
+        # 4. Determine Team Mentality
+        ai_strength = sum(self.unit_values.get(u.get("type", "").lower(), 20) for u in ai_units if "relay" not in u.get("type", "").lower())
+        enemy_strength = sum(self.unit_values.get(u.get("type", "").lower(), 20) for u in enemy_units if "relay" not in u.get("type", "").lower())
+
+        if max_arsenal_threat >= 2.0 or ai_strength < enemy_strength * 0.7:
+            mentality = "DEFENSIVE"
+            self.macro_state = "DESPERATION_CHOKE"
+        elif max_arsenal_threat == 0.0 and (ai_strength > enemy_strength * 1.2 or enemy_strength <= 100):
+            mentality = "ATTACKING"
+            self.macro_state = "ANNIHILATION_HUNT"
+        else:
+            mentality = "BALANCED"
+            self.macro_state = "STANDARD"
+
+        # Track targets for compatibility
+        uncaptured_enemy_arsenals = []
         for ax, ay in self.engine.arsenals[self.enemy_side]:
             is_captured = any(u["x"] == ax and u["y"] == ay and u["side"] == self.side for u in units)
             if not is_captured:
-                guard_strength = sum(self.unit_values.get(e["type"].lower(), 20) for e in enemy_units if
-                                     abs(e["x"] - ax) + abs(e["y"] - ay) <= 4)
-                open_enemy_arsenals.append(((ax, ay), guard_strength))
+                uncaptured_enemy_arsenals.append((ax, ay))
+        if uncaptured_enemy_arsenals:
+            self.target_arsenal_coords = uncaptured_enemy_arsenals[0]
 
-        if self.macro_state == "DESPERATION_CHOKE" and open_enemy_arsenals:
-            open_enemy_arsenals.sort(key=lambda item: item[1])
-            self.target_arsenal_coords = open_enemy_arsenals[0][0]
-
-        for unit in units:
-            if unit.get("side") != self.side:
-                continue
-
-            u_id = unit["id"]
-            u_type = unit.get("type", "").lower()
-            ux, uy = unit["x"], unit["y"]
-
-            if u_type == "relay":
-                self.macro_directives[u_id] = "DYNAMIC_LINK"
-                continue
-
-            if self.macro_state == "DESPERATION_CHOKE" and self.target_arsenal_coords:
-                self.macro_directives[u_id] = "CHOKE_RUN"
-                continue
-
-            if self.macro_state == "ANNIHILATION_HUNT":
-                self.macro_directives[u_id] = "HUNTER_SEEKER"
-                continue
-
-            heavy_threat_nearby = any(
-                ec["strength"] > 120 and (abs(ux - ec["center"][0]) + abs(uy - ec["center"][1]) <= 5) for ec in
-                enemy_clusters)
-            if heavy_threat_nearby and u_type in ["infantry", "artillery"]:
-                self.macro_directives[u_id] = "SHIELD_WALL"
+        # 5. Squad Partitioning (Tactical Roles)
+        enemy_arsenals = self.engine.arsenals[self.enemy_side]
+        combat_units = [u for u in ai_units if "relay" not in u.get("type", "").lower()]
+        
+        roles = {}
+        regular_combat_units = []
+        
+        # Explicit exception: any combat unit occupying an enemy arsenal becomes an ARSENAL_GUARD
+        # and is excluded from regular squad/role overrides
+        for u in combat_units:
+            if (u["x"], u["y"]) in enemy_arsenals:
+                roles[u["id"]] = "ARSENAL_GUARD"
+                self.macro_directives[u["id"]] = "GUARD"
             else:
-                self.macro_directives[u_id] = "STANDARD_MARCH"
+                regular_combat_units.append(u)
+
+        home_coords = list(my_arsenals) if my_arsenals else [(12, 19 if self.side == "South" else 0)]
+        regular_combat_units.sort(key=lambda u: min(self.get_path_distance(u["x"], u["y"], hc) for hc in home_coords))
+
+        n_combat = len(regular_combat_units)
+
+        if mentality == "DEFENSIVE":
+            n_defenders = int(n_combat * 0.6)
+        elif mentality == "ATTACKING":
+            n_defenders = max(1, int(n_combat * 0.15))
+        else:
+            n_defenders = int(n_combat * 0.3)
+
+        defenders = regular_combat_units[:n_defenders]
+        attackers_and_others = regular_combat_units[n_defenders:]
+
+        for u in defenders:
+            roles[u["id"]] = "DEFENDER"
+            self.macro_directives[u["id"]] = "SHIELD_WALL"
+
+        for u in attackers_and_others:
+            dist_to_target = self.get_path_distance(u["x"], u["y"], target_coords)
+            if dist_to_target > 6:
+                roles[u["id"]] = "REINFORCEMENT"
+                self.macro_directives[u["id"]] = "STANDARD_MARCH"
+            else:
+                roles[u["id"]] = "ATTACKER"
+                self.macro_directives[u["id"]] = "HUNTER_SEEKER" if mentality == "ATTACKING" else "STANDARD_MARCH"
+
+        for relay in my_relays:
+            roles[relay["id"]] = "RELAY_SUPPORT"
+            self.macro_directives[relay["id"]] = "DYNAMIC_LINK"
+
+        self.orchestration_data = {
+            "mentality": mentality,
+            "target_coords": target_coords,
+            "roles": roles,
+            "weakest_cluster": weakest_cluster,
+            "threatened_arsenals": threatened_arsenals,
+            "threatened_relays": threatened_relays,
+            "max_arsenal_threat": max_arsenal_threat
+        }
 
     def detect_threats(self, units: list) -> float:
         """Tracks direct proximity risks to back-line assets."""
@@ -177,13 +312,13 @@ class WarGameAI:
 
         for relay in friendly_relays:
             for enemy in enemy_units:
-                dist = abs(relay["x"] - enemy["x"]) + abs(relay["y"] - enemy["y"])
+                dist = max(abs(relay["x"] - enemy["x"]), abs(relay["y"] - enemy["y"]))
                 if dist <= 4:
                     threat_score -= (5 - dist) * 180.0
 
         for ax, ay in self.engine.arsenals[self.side]:
             for enemy in enemy_units:
-                dist = abs(enemy["x"] - ax) + abs(enemy["y"] - ay)
+                dist = max(abs(enemy["x"] - ax), abs(enemy["y"] - ay))
                 if dist <= 9:
                     threat_score -= (10 - dist) * 130.0
 
@@ -215,12 +350,45 @@ class WarGameAI:
             elif (ux, uy) in self.engine.passes:
                 defense += 2
 
+            contributing_defenders = set()
+            for dx, dy in self.engine.directions:
+                line_friendlies = []
+                cx, cy = ux + dx, uy + dy
+                while 0 <= cx < self.engine.cols and 0 <= cy < self.engine.rows:
+                    if (cx, cy) in self.engine.mountains:
+                        break
+                    u = next((a for a in ai_units if a['x'] == cx and a['y'] == cy), None)
+                    if u:
+                        if u['id'] != u_id:
+                            line_friendlies.append(u)
+                        else:
+                            break
+                    else:
+                        if line_friendlies:
+                            if len(line_friendlies) >= 2:
+                                for lf in line_friendlies:
+                                    contributing_defenders.add(lf['id'])
+                            line_friendlies = []
+                    cx += dx
+                    cy += dy
+                if len(line_friendlies) >= 2:
+                    for lf in line_friendlies:
+                        contributing_defenders.add(lf['id'])
+
             for a in ai_units:
                 if a["id"] == u_id:
                     continue
                 a_stats = self.engine.get_stats(a.get("type", ""))
                 if self.engine.check_line_of_sight(a["x"], a["y"], ux, uy, a_stats["range"], units):
-                    defense += a_stats["defense"]
+                    contributing_defenders.add(a["id"])
+
+            for a_id in contributing_defenders:
+                a = next(x for x in ai_units if x["id"] == a_id)
+                a_stats = self.engine.get_stats(a.get("type", ""))
+                defense += a_stats["defense"]
+
+            if (ux, uy) in self.engine.fortresses or (ux, uy) in self.engine.passes:
+                defense *= 2
 
             if u_id not in ai_connected:
                 defense = max(1, defense // 2)
@@ -229,7 +397,7 @@ class WarGameAI:
             for enemy in enemy_units:
                 e_stats = self.engine.get_stats(enemy.get("type", ""))
                 reach = e_stats["speed"] + e_stats["range"]
-                dist = abs(enemy["x"] - ux) + abs(enemy["y"] - uy)
+                dist = max(abs(enemy["x"] - ux), abs(enemy["y"] - uy))
                 if dist <= reach:
                     is_charge_range = dist <= e_stats["speed"] + 1
                     potential_offense += e_stats.get("charge", e_stats["offense"]) if is_charge_range else e_stats[
@@ -238,6 +406,69 @@ class WarGameAI:
             threats[u_id] = potential_offense - defense
 
         return threats
+
+    def _decide_local_goals(self, units: list, ai_connected: set) -> dict:
+        """
+        LOCAL GOAL DECIDER (The Player Mind)
+        Determines the local dynamic goal (e.g. RETREAT, ATTACK, DEFEND, TRAVEL, STAY)
+        for each friendly unit based on its local threat profile and global partition role.
+        """
+        goals = {}
+        ai_units = [u for u in units if u.get("side") == self.side]
+        enemy_units = [u for u in units if u.get("side") == self.enemy_side]
+
+        # Re-use existing local threat assessment
+        local_threats = self._assess_local_threats(units, ai_connected)
+
+        roles = self.orchestration_data.get("roles", {})
+        target_coords = self.orchestration_data.get("target_coords", (12, 10))
+
+        for unit in ai_units:
+            uid = unit["id"]
+            u_type = unit.get("type", "").lower()
+            ux, uy = unit["x"], unit["y"]
+            role = roles.get(uid, "ATTACKER")
+            threat = local_threats.get(uid, 0.0)
+
+            # Relays are handled differently
+            if u_type == "relay":
+                if threat > 0.0:
+                    goals[uid] = "ESCAPE"
+                else:
+                    goals[uid] = "SUPPORT_NET"
+                continue
+
+            # Combat units
+            # 1. RETREAT check: if threat is high and we are likely to be destroyed, run!
+            if threat > 5.0:
+                goals[uid] = "RETREAT"
+                continue
+
+            # 2. Direct ATTACK check: can we hit any enemy directly from here?
+            stats = self.engine.get_stats(unit["type"])
+            has_los_target = False
+            for target in enemy_units:
+                if self.engine.check_line_of_sight(ux, uy, target["x"], target["y"], stats["range"], units):
+                    combat = self.engine.calculate_combat(units, self.side, target["x"], target["y"])
+                    if combat.get("valid") and combat["result"] in ["DESTROY", "RETREAT"]:
+                        has_los_target = True
+                        break
+
+            if has_los_target:
+                goals[uid] = "ATTACK"
+                continue
+
+            # 3. Role-based fallback
+            if role == "DEFENDER":
+                goals[uid] = "DEFEND"
+            elif role == "ATTACKER":
+                goals[uid] = "ATTACK_RUN"
+            elif role == "REINFORCEMENT":
+                goals[uid] = "TRAVEL"
+            else:
+                goals[uid] = "STAY"
+
+        return goals
 
     def _cluster_own_units(self, units):
         """Groups this side's units into spatially local factions so move
@@ -322,7 +553,7 @@ class WarGameAI:
             ex, ey = enemy.get("x", 0), enemy.get("y", 0)
             for ally in ai_units:
                 ax, ay = ally.get("x", 0), ally.get("y", 0)
-                dist = abs(ex - ax) + abs(ey - ay)
+                dist = max(abs(ex - ax), abs(ey - ay))
                 if dist < min_global_distance:
                     min_global_distance = dist
 
@@ -333,7 +564,8 @@ class WarGameAI:
                 converging_friendly_count = 0
                 for ally in ai_units:
                     ax, ay = ally.get("x", 0), ally.get("y", 0)
-                    if abs(ex - ax) + abs(ey - ay) <= (4 if ally.get("type", "").lower() == "cavalry" else 3):
+                    reach = 4 if ally.get("type", "").lower() in ["cavalry", "artillery"] else 3
+                    if max(abs(ex - ax), abs(ey - ay)) <= reach:
                         converging_friendly_count += 1
                 if converging_friendly_count == 1:
                     stacked_attack_pressure += 10.0
@@ -368,14 +600,14 @@ class WarGameAI:
                     if t_id == u_id:
                         continue
                     ally = next((a for a in ai_units if a["id"] == t_id), None)
-                    if ally and abs(ux - ally["x"]) + abs(uy - ally["y"]) == 1:
+                    if ally and max(abs(ux - ally["x"]), abs(uy - ally["y"])) == 1:
                         role_score += min(severity, 15) * 25.0
 
             # --- SELF-PRESERVATION: if this unit itself is exposed, favor
             # positions that add friendly support rather than isolation ---
             if u_id in threatened_units:
                 nearby_allies = sum(1 for a in ai_units if a["id"] != u_id and
-                                    abs(ux - a["x"]) + abs(uy - a["y"]) <= 1)
+                                    max(abs(ux - a["x"]), abs(uy - a["y"])) <= 1)
                 role_score += nearby_allies * 60.0
                 role_score -= min(threatened_units[u_id], 20) * 20.0
 
@@ -384,55 +616,74 @@ class WarGameAI:
                 if combat_allies:
                     avg_ax = sum(a["x"] for a in combat_allies) / len(combat_allies)
                     avg_ay = sum(a["y"] for a in combat_allies) / len(combat_allies)
-                    role_score += (45 - (abs(ux - avg_ax) + abs(uy - avg_ay))) * 160.0
+                    role_score += (45 - max(abs(ux - avg_ax), abs(uy - avg_ay))) * 160.0
 
-                if uncaptured_enemy_arsenals:
-                    min_dist_a = min(abs(ux - ax) + abs(uy - ay) for ax, ay in uncaptured_enemy_arsenals)
+                all_enemy_arsenals = self.engine.arsenals[self.enemy_side]
+                if all_enemy_arsenals:
+                    min_dist_a = min(max(abs(ux - ax), abs(uy - ay)) for ax, ay in all_enemy_arsenals)
                     role_score += (45 - min_dist_a) * 90.0
                 elif all_enemy_positions:
-                    min_dist_e = min(abs(ux - ex) + abs(uy - ey) for ex, ey in all_enemy_positions)
+                    min_dist_e = min(max(abs(ux - ex), abs(uy - ey)) for ex, ey in all_enemy_positions)
                     role_score += (45 - min_dist_e) * 90.0
 
                 if is_connected: role_score += 100.0
                 continue
 
-            if uncaptured_enemy_arsenals:
-                min_dist_to_uncaptured = min(abs(ux - ax) + abs(uy - ay) for ax, ay in uncaptured_enemy_arsenals)
-                role_score += (45 - min_dist_to_uncaptured) * 250.0
+            all_enemy_arsenals = self.engine.arsenals[self.enemy_side]
+            if all_enemy_arsenals:
+                min_dist_to_arsenal = min(max(abs(ux - ax), abs(uy - ay)) for ax, ay in all_enemy_arsenals)
+                role_score += (45 - min_dist_to_arsenal) * 250.0
 
             for ax, ay in captured_enemy_arsenals:
                 if ux == ax and uy == ay:
-                    has_nearby_threat = any(abs(ex - ax) + abs(ey - ay) <= 5 for ex, ey in all_enemy_positions)
+                    has_nearby_threat = any(max(abs(ex - ax), abs(ey - ay)) <= 5 for ex, ey in all_enemy_positions)
                     if has_nearby_threat:
-                        role_score += 700.0
+                        role_score += 7000.0  # Massive priority to hold captured enemy arsenals under threat
                     else:
-                        role_score += 250.0
+                        role_score += 5000.0  # Keep occupying captured enemy arsenals to maintain supply line extension
 
-            for enemy in enemy_units:
-                ex, ey = enemy.get("x", 0), enemy.get("y", 0)
-                e_id = enemy.get("id")
-                is_deactivated = e_id not in enemy_connected
-                dist_to_enemy = abs(ux - ex) + abs(uy - ey)
+            if enemy_units:
+                dists = []
+                for enemy in enemy_units:
+                    ex, ey = enemy.get("x", 0), enemy.get("y", 0)
+                    e_id = enemy.get("id")
+                    is_deactivated = e_id not in enemy_connected
+                    dist_to_enemy = max(abs(ux - ex), abs(uy - ey))
+                    dists.append((dist_to_enemy, is_deactivated))
 
+                min_dist, is_deactivated = min(dists, key=lambda x: x[0])
                 if is_deactivated:
-                    role_score += (45 - dist_to_enemy) * 350.0
+                    role_score += (45 - min_dist) * 350.0
                 else:
-                    role_score += (45 - dist_to_enemy) * 150.0
+                    role_score += (45 - min_dist) * 150.0
 
-                if dist_to_enemy == 1:
-                    role_score += 800.0
+                # Support contact bonus: give additional points if next to any enemy (facilitates engagement)
+                for dist_to_enemy, _ in dists:
+                    if dist_to_enemy == 1:
+                        role_score += 800.0
 
             if self.macro_state == "DESPERATION_CHOKE" and self.target_arsenal_coords:
-                dist_to_target = abs(ux - self.target_arsenal_coords[0]) + abs(uy - self.target_arsenal_coords[1])
+                dist_to_target = max(abs(ux - self.target_arsenal_coords[0]), abs(uy - self.target_arsenal_coords[1]))
                 role_score += (45 - dist_to_target) * 400.0
 
             if directive == "SHIELD_WALL":
-                neighbor_allies = sum(1 for a in ai_units if abs(ux - a["x"]) + abs(uy - a["y"]) == 1)
+                neighbor_allies = sum(1 for a in ai_units if max(abs(ux - a["x"]), abs(uy - a["y"])) == 1)
                 role_score += neighbor_allies * 120.0
 
             dist_to_goal = self.get_path_distance_to_goal(ux, uy, target_y)
             role_score += (20 - dist_to_goal) * 10.0
             if is_connected: role_score += 50.0
+
+            # Formation / Cohesion stacking bonus: reward combat units that stand adjacent to other friendly combat units
+            if "relay" not in u_type:
+                has_adjacent_ally = any(
+                    a["id"] != u_id and 
+                    "relay" not in a.get("type", "").lower() and 
+                    max(abs(ux - a["x"]), abs(uy - a["y"])) == 1 
+                    for a in ai_units
+                )
+                if has_adjacent_ally:
+                    role_score += 40.0
 
         if connected_y_positions and self.macro_state == "STANDARD":
             avg_y = sum(connected_y_positions) / len(connected_y_positions)
@@ -480,25 +731,104 @@ class WarGameAI:
 
         return None
 
+    def _get_loc_cells(self, units: list) -> set:
+        """Set of (x,y) cells on this side's active LoC network."""
+        raw = self.engine.compute_lines_of_communication(units, self.side)
+        return {(c[0], c[1]) for c in raw}
+
+    def _compute_relay_expansion(self, units: list, relay_id: str, tx: int, ty: int) -> int:
+        """
+        Net new LoC cells gained by moving relay to (tx, ty).
+        Positive = relay move opens new territory for combat units.
+        Negative = relay move shrinks coverage (penalise this).
+        """
+        before = len(self.engine.compute_lines_of_communication(units, self.side))
+        ghost = copy.deepcopy(units)
+        for u in ghost:
+            if u["id"] == relay_id:
+                u["x"], u["y"] = tx, ty
+                break
+        after = len(self.engine.compute_lines_of_communication(ghost, self.side))
+        return after - before
+
+    def _get_lane_target(self, unit: dict, units: list) -> tuple:
+        """
+        Assigns each combat unit a lane-specific target cell.
+        Board is divided into three lanes by x-coordinate:
+          Left  : x <= 8   targets enemies/arsenals in the left corridor
+          Center: 9-15     targets the centre mass
+          Right : x >= 16  targets enemies/arsenals in the right corridor
+        Falls back to the global closest enemy if the lane is empty.
+        """
+        ux = unit["x"]
+        enemy_units = [u for u in units if u.get("side") == self.enemy_side]
+
+        if ux <= 8:
+            lane_enemies = [e for e in enemy_units if e["x"] <= 10]
+        elif ux >= 16:
+            lane_enemies = [e for e in enemy_units if e["x"] >= 14]
+        else:
+            lane_enemies = enemy_units
+
+        if not lane_enemies:
+            lane_enemies = enemy_units
+        if not lane_enemies:
+            # No enemies left — head for enemy arsenal
+            arsenals = self.engine.arsenals[self.enemy_side]
+            return min(arsenals, key=lambda a: abs(a[0] - ux) + abs(a[1] - unit["y"]))
+
+        return min(
+            [(e["x"], e["y"]) for e in lane_enemies],
+            key=lambda p: abs(p[0] - ux) + abs(p[1] - unit["y"])
+        )
+
     def get_all_legal_moves(self, units: list, moved_this_turn: list) -> list:
         legal_actions = []
         ai_units = [u for u in units if u.get("side") == self.side]
+
+
+
         for unit in ai_units:
             if unit["id"] in moved_this_turn:
                 continue
+
+            unit_type = unit.get("type", "").lower()
+            is_relay = "relay" in unit_type
+
+            # Attack actions — only valid if this unit has direct line of sight and range to target
+            unit_stats = self.engine.get_stats(unit["type"])
             for target in units:
                 if target.get("side") == self.enemy_side:
-                    combat = self.engine.calculate_combat(units, self.side, target["x"], target["y"])
-                    if combat.get("valid"):
-                        legal_actions.append(
-                            {"action_type": "attack", "unitId": unit["id"], "x": target["x"], "y": target["y"]})
+                    if self.engine.check_line_of_sight(unit["x"], unit["y"], target["x"], target["y"], unit_stats["range"], units):
+                        combat = self.engine.calculate_combat(units, self.side, target["x"], target["y"])
+                        if combat.get("valid"):
+                            legal_actions.append(
+                                {"action_type": "attack", "unitId": unit["id"],
+                                 "x": target["x"], "y": target["y"]})
+
+            # Move actions
             for dx in range(-3, 4):
                 for dy in range(-3, 4):
                     tx, ty = unit["x"] + dx, unit["y"] + dy
                     if 0 <= tx < 25 and 0 <= ty < 20:
                         is_valid, _ = self.engine.validate_move(units, unit["id"], tx, ty, moved_this_turn)
                         if is_valid:
-                            legal_actions.append({"action_type": "move", "unitId": unit["id"], "x": tx, "y": ty})
+                            if is_relay:
+                                # Relays shape the LoC — they are unrestricted so they
+                                # can push forward and open new territory.
+                                legal_actions.append(
+                                    {"action_type": "move", "unitId": unit["id"], "x": tx, "y": ty})
+                            else:
+                                # Combat units: allow any move that does NOT
+                                # disconnect a currently-connected friendly unit.
+                                # Frontier units can step forward (no one behind
+                                # them loses connection). Units in the middle can
+                                # still move sideways if cohesion is preserved.
+                                # Disconnecting moves get a heavy penalty in
+                                # scoring but are no longer silently dropped.
+                                # Allow disconnecting moves to be evaluated; select_best_action applies cohesion/disconnection penalties dynamically
+                                legal_actions.append(
+                                    {"action_type": "move", "unitId": unit["id"], "x": tx, "y": ty})
         return legal_actions
 
     def calculate_cohesion_loss(self, units, unit_id, target_x, target_y):
@@ -510,7 +840,7 @@ class WarGameAI:
         after = self.engine.get_connected_units(ghost, self.side)
         return len(before - after)
 
-    def select_best_action(self, current_state: dict) -> dict:
+    def select_best_action(self, current_state: dict, allowed_clusters: set = None) -> dict:
         units = current_state["units"]
         moved_this_turn = current_state["moved_units_this_turn"]
         attack_executed = current_state["attack_executed_this_turn"]
@@ -523,9 +853,7 @@ class WarGameAI:
         base_enemy_connected = start_north if self.side == "South" else start_south
         base_my_connected = start_south if self.side == "South" else start_north
 
-        # ─── ADD THIS LINE TO FIX THE NAMEERROR ───────────────────────────
         target_y = 0 if self.side == "South" else 19
-        # ──────────────────────────────────────────────────────────────────
 
         # --- UPDATE TEMPORAL TRACKER KEYS ---
         for u in units:
@@ -537,7 +865,10 @@ class WarGameAI:
                 if len(self.position_history[uid]) > 8:
                     self.position_history[uid].pop(0)
 
-        self._assign_macro_directives(units, base_my_connected, base_enemy_connected)
+        # Run the Global Tactical Orchestrator
+        self._orchestrate_tactics(units, base_my_connected, base_enemy_connected)
+        # Get dynamic local goals
+        local_goals = self._decide_local_goals(units, base_my_connected)
 
         current_my_score = self.evaluate_board(units, base_enemy_connected=base_enemy_connected)
         if self.defensive_weight > 0:
@@ -546,115 +877,268 @@ class WarGameAI:
         else:
             baseline_score = current_my_score
 
-        if self.macro_state in ["ANNIHILATION_HUNT", "DESPERATION_CHOKE"]:
-            best_score = float('-inf')
-            best_action = None
-        else:
-            best_score = baseline_score
-            best_action = {"action_type": "end_turn"}
+        # Initialize best_score to baseline_score minus a tolerance threshold (2000.0).
+        # This allows the AI to make progress moves that have minor negative modifiers (e.g. cohesion loss,
+        # leaving a defend post), while still preventing suicidal or catastrophic actions.
+        best_score = baseline_score - 2000.0
+        best_action = {"action_type": "end_turn"}
 
         actions = self.get_all_legal_moves(units, moved_this_turn)
         if not actions:
             return {"action_type": "end_turn"}
 
-        unit_to_cluster = self._cluster_own_units(units)
-        actions_by_cluster = {}
-        for action in actions:
-            cid = unit_to_cluster.get(action["unitId"], -1)
-            actions_by_cluster.setdefault(cid, []).append(action)
+        # Separate move actions and attack actions
+        move_actions = [a for a in actions if a["action_type"] == "move"]
+        attack_actions = [a for a in actions if a["action_type"] == "attack"]
 
-        cluster_ids = sorted(actions_by_cluster.keys())
-        start = self.cluster_turn_cursor % len(cluster_ids)
-        ordered_clusters = cluster_ids[start:] + cluster_ids[:start]
+        # Group move actions by cluster
+        unit_to_cluster = self._cluster_own_units(units)
+        moves_by_cluster = {}
+        for action in move_actions:
+            cid = unit_to_cluster.get(action["unitId"], -1)
+            if allowed_clusters is None or cid in allowed_clusters:
+                moves_by_cluster.setdefault(cid, []).append(action)
+
+        cluster_ids = sorted(moves_by_cluster.keys())
+        chosen_cluster = None
+        if cluster_ids:
+            start = self.cluster_turn_cursor % len(cluster_ids)
+            ordered_clusters = cluster_ids[start:] + cluster_ids[:start]
+            chosen_cluster = ordered_clusters[0]
+            candidate_actions = list(moves_by_cluster[chosen_cluster])
+            self.cluster_turn_cursor = (self.cluster_turn_cursor + 1) % len(cluster_ids)
+        else:
+            candidate_actions = []
+
+        # Merge ALL attacks globally into the candidate actions pool
+        candidate_actions.extend(attack_actions)
+
+        if not candidate_actions:
+            return {"action_type": "end_turn"}
 
         diagnostic_log = {}
-        chosen_cluster = ordered_clusters[0]
-        actions = actions_by_cluster[chosen_cluster]
-        self.cluster_turn_cursor = (self.cluster_turn_cursor + 1) % len(cluster_ids)
+        actions = candidate_actions
+
+        ai_units = [u for u in units if u.get("side") == self.side]
+        enemy_units = [u for u in units if u.get("side") == self.enemy_side]
 
         for action in actions:
             temp = copy.deepcopy(units)
             mod = 0.0
             act_uid = action.get("unitId")
 
-            # if action["action_type"] == "attack":
-            #     if attack_executed: continue
-            #     combat = self.engine.calculate_combat(temp, self.side, action["x"], action["y"])
-            #     if combat.get("valid"):
-            #         if combat["result"] == "DESTROY":
-            #             return action
-            #         elif combat["result"] == "RETREAT":
-            #             mod += 500.0
-            #         target_connected = self.engine.get_connected_units(temp, self.enemy_side)
-            #         target_unit = next((u for u in temp if u["x"] == action["x"] and u["y"] == action["y"]), None)
-            #         if target_unit and target_unit["id"] not in target_connected:
-            #             mod += 800.0
+            acting_unit = next((u for u in units if u["id"] == act_uid), None)
+            if not acting_unit and action["action_type"] != "end_turn":
+                continue
 
             if action["action_type"] == "attack":
                 if attack_executed: continue
                 combat = self.engine.calculate_combat(temp, self.side, action["x"], action["y"])
                 if combat.get("valid"):
+                    # Find if target unit is cut off
+                    target_unit = next((u for u in temp if u["x"] == action["x"] and u["y"] == action["y"]), None)
+                    is_target_cutoff = False
+                    if target_unit:
+                        target_connected = target_unit["id"] in self.engine.get_connected_units(temp, self.enemy_side)
+                        is_target_cutoff = not target_connected
+
                     if combat["result"] == "DESTROY":
-                        mod += 10000.0 + combat["net_force"] * 100.0
-                        # Simulate the kill so evaluate_board reflects the
-                        # actual post-attack board, not a no-op.
+                        # Shoot to kill: large destroy bonus
+                        mod += 15000.0 + combat["net_force"] * 100.0
+                        if is_target_cutoff:
+                            mod += 5000.0  # extra priority to kill cut off units quickly!
                         temp = [u for u in temp if not (u["x"] == action["x"] and u["y"] == action["y"])]
                     elif combat["result"] == "RETREAT":
-                        mod += 300.0 + combat["net_force"] * 100.0
+                        mod += 3000.0 + combat["net_force"] * 100.0
+                        if is_target_cutoff:
+                            mod += 2000.0
                         target_connected = self.engine.get_connected_units(temp, self.enemy_side)
-                        target_unit = next((u for u in temp if u["x"] == action["x"] and u["y"] == action["y"]), None)
                         if target_unit and target_unit["id"] not in target_connected:
-                            mod += 800.0
+                            mod += 1000.0
                     else:
-                        # FAIL: wastes the turn's one attack action for
-                        # nothing — actively discourage it so the AI
-                        # only attacks when it expects a real result.
-                        mod -= 2000.0
+                        # Wasting an attack on a failed combat is heavily penalized
+                        mod -= 100000.0
 
             elif action["action_type"] == "move":
-                if (action["x"], action["y"]) in self.engine.arsenals[self.enemy_side]:
-                    mod += 5000.0
+                # Penalize abandoning a captured enemy arsenal unless another friendly unit is guarding it
+                enemy_arsenals = self.engine.arsenals[self.enemy_side]
+                was_on_arsenal = acting_unit and (acting_unit["x"], acting_unit["y"]) in enemy_arsenals
+                if was_on_arsenal:
+                    ax, ay = acting_unit["x"], acting_unit["y"]
+                    other_occupant = any(u["id"] != act_uid and u["x"] == ax and u["y"] == ay and u["side"] == self.side for u in units)
+                    if not other_occupant and (action["x"], action["y"]) != (ax, ay):
+                        mod -= 40000.0  # Massive penalty for leaving an occupied enemy arsenal unprotected!
+
+                if (action["x"], action["y"]) in enemy_arsenals:
+                    mod += 15000.0  # Huge bonus to capture/occupy an enemy arsenal!
 
                 for u in temp:
                     if u.get("id") == act_uid:
                         u["x"], u["y"] = action["x"], action["y"]
 
+                # ── STRATEGIC SUPPLY-LINE INTERCEPTION (NON-LETHAL KILLS) ──
                 try:
-                    enemy_connected_after = self.engine.get_connected_units(temp, self.enemy_side)
-                    if len(enemy_connected_after) < len(base_enemy_connected):
-                        mod += 1500.0
+                    enemy_connected_before_action = self.engine.get_connected_units(units, self.enemy_side)
+                    enemy_connected_after_action = self.engine.get_connected_units(temp, self.enemy_side)
+                    newly_cut_off = (base_enemy_connected & enemy_connected_before_action) - enemy_connected_after_action
+                    if newly_cut_off:
+                        cut_off_value = 0.0
+                        for target_id in newly_cut_off:
+                            target_unit = next((u for u in enemy_units if u["id"] == target_id), None)
+                            if target_unit:
+                                target_val = self.unit_values.get(target_unit["type"].lower(), 20)
+                                cut_off_value += target_val
+                        mod += 8000.0 + cut_off_value * 200.0
+                except Exception as e:
+                    pass
+
+                # Cohesion loss penalty (Self/Teammate Disconnection from Supply Line)
+                try:
+                    before_connected = self.engine.get_connected_units(units, self.side)
+                    after_connected = self.engine.get_connected_units(temp, self.side)
+                    lost_ids = before_connected - after_connected
+                    if lost_ids:
+                        cutoff_penalty = 0.0
+                        for lost_id in lost_ids:
+                            lost_unit = next((u for u in units if u["id"] == lost_id), None)
+                            if lost_unit:
+                                if "relay" in lost_unit.get("type", "").lower():
+                                    cutoff_penalty += 6000.0  # Devastating penalty for cutting off a relay
+                                else:
+                                    cutoff_penalty += 3500.0  # Heavy penalty for cutting off a combat unit
+                        mod -= cutoff_penalty
                 except:
                     pass
 
                 lost = self.calculate_cohesion_loss(units, act_uid, action["x"], action["y"])
                 if lost > 0:
-                    cohesion_factor = 30.0 if self.macro_state == "ANNIHILATION_HUNT" else (
-                        600.0 if len(units) > 10 else 100.0)
-
+                    base_cohesion_factor = (
+                        15.0 if self.macro_state == "ANNIHILATION_HUNT" else
+                        (200.0 if len(units) > 10 else 60.0)
+                    )
                     if self.macro_state == "ANNIHILATION_HUNT":
-                        cohesion_factor = 0.0
+                        base_cohesion_factor = 0.0
 
+                    history_here = self.position_history.get(act_uid, [])
+                    frozen_turns = 0
+                    if acting_unit and len(history_here) >= 3:
+                        for pos in reversed(history_here[-6:]):
+                            if pos == (acting_unit["x"], acting_unit["y"]):
+                                frozen_turns += 1
+                            else:
+                                break
+                    stasis_divisor = max(0.1, 1.0 - (frozen_turns // 2) * 0.4)
+                    cohesion_factor = base_cohesion_factor * stasis_divisor
                     mod -= (lost * cohesion_factor)
 
-                # unit = next(u for u in units if u['id'] == act_uid)
-                unit = next((u for u in units if u['id'] == act_uid), None)
-                if not unit:
-                    continue
-                dist_moved = abs(unit['x'] - action['x']) + abs(unit['y'] - action['y'])
-                if dist_moved <= 1:
-                    mod += 0.0 if self.macro_state in ["ANNIHILATION_HUNT", "DESPERATION_CHOKE"] else 15.0
+                # ── GOAL-SPECIFIC MODIFIERS (FIFA-STYLE INDIVIDUAL INTELLIGENCE) ──
+                goal = local_goals.get(act_uid, "STAY")
+                mentality = self.orchestration_data.get("mentality", "BALANCED")
+                target_coords = self.orchestration_data.get("target_coords", (12, 10))
 
-            # --- BREAKDOWN INTERCEPTION PIPELINE ---
-            # my_breakdown = self.evaluate_board(temp, return_breakdown=True, base_enemy_connected=base_enemy_connected)
-            # if self.defensive_weight > 0:
-            #     enemy_score = self.enemy_evaluator.evaluate_board(temp, base_enemy_connected=base_my_connected)
-            #     score = (my_breakdown["TOTAL"] - self.defensive_weight * enemy_score) + mod
-            # else:
-            #     score = my_breakdown["TOTAL"] + mod
+                if acting_unit:
+                    u_type = acting_unit.get("type", "").lower()
+                    
+                    if u_type == "relay":
+                        if goal == "ESCAPE":
+                            # Highly threatened relay: run to safety, get next to defenders
+                            dist_enemy_before = min(self.get_path_distance(acting_unit["x"], acting_unit["y"], (e["x"], e["y"])) for e in enemy_units) if enemy_units else 99
+                            dist_enemy_after = min(self.get_path_distance(action["x"], action["y"], (e["x"], e["y"])) for e in enemy_units) if enemy_units else 99
+                            mod += (dist_enemy_after - dist_enemy_before) * 300.0
+                            
+                            allies_adjacent = sum(1 for a in ai_units if "relay" not in a.get("type", "").lower() and max(abs(action["x"] - a["x"]), abs(action["y"] - a["y"])) <= 1)
+                            mod += allies_adjacent * 250.0
+                        else:
+                            # SUPPORT_NET mode: keep supply line connected, reward extensions
+                            try:
+                                before_connected = self.engine.get_connected_units(units, self.side)
+                                after_connected = self.engine.get_connected_units(temp, self.side)
+                                newly_connected = after_connected - before_connected
+                                newly_disconnected = before_connected - after_connected
+                                for conn_uid in newly_connected:
+                                    conn_unit = next((u for u in units if u["id"] == conn_uid), None)
+                                    if conn_unit:
+                                        if "relay" in conn_unit.get("type", "").lower():
+                                            mod += 4000.0  # Huge bonus to reconnect a friendly relay playmaker!
+                                        else:
+                                            mod += 2000.0  # Big bonus to reconnect combat units
+                                mod -= len(newly_disconnected) * 2500.0
+                            except:
+                                pass
+
+                            # Target positioning: stay 2-4 steps behind attackers to act as playmakers/bridges
+                            attackers = [u for u in ai_units if self.orchestration_data.get("roles", {}).get(u["id"]) == "ATTACKER"]
+                            if attackers:
+                                avg_ax = sum(a["x"] for a in attackers) / len(attackers)
+                                avg_ay = sum(a["y"] for a in attackers) / len(attackers)
+                                dist_to_attackers = self.get_path_distance(action["x"], action["y"], (int(avg_ax), int(avg_ay)))
+                                if 2 <= dist_to_attackers <= 3:
+                                    mod += 800.0
+                                else:
+                                    mod += (10 - abs(dist_to_attackers - 2.5)) * 100.0
+
+                            # Relay must NEVER commit suicide by moving next to enemy combat units
+                            enemy_combat = [e for e in enemy_units if "relay" not in e.get("type", "").lower()]
+                            if enemy_combat:
+                                min_dist_enemy = min(max(abs(action["x"] - e["x"]), abs(action["y"] - e["y"])) for e in enemy_combat)
+                                if min_dist_enemy <= 1:
+                                    mod -= 5000.0
+                                elif min_dist_enemy <= 3:
+                                    mod -= 1000.0
+
+                    else:
+                        # Combat Units
+                        if goal == "RETREAT":
+                            dist_enemy_before = min(self.get_path_distance(acting_unit["x"], acting_unit["y"], (e["x"], e["y"])) for e in enemy_units) if enemy_units else 99
+                            dist_enemy_after = min(self.get_path_distance(action["x"], action["y"], (e["x"], e["y"])) for e in enemy_units) if enemy_units else 99
+                            mod += (dist_enemy_after - dist_enemy_before) * 150.0
+
+                            allies_adjacent = sum(1 for a in ai_units if max(abs(action["x"] - a["x"]), abs(action["y"] - a["y"])) <= 1 and a["id"] != act_uid)
+                            mod += allies_adjacent * 100.0
+
+                            if (action["x"], action["y"]) in self.engine.fortresses or (action["x"], action["y"]) in self.engine.passes:
+                                mod += 400.0
+
+                            # Retreat towards home rows
+                            mod += (action["y"] - acting_unit["y"] if self.side == "South" else acting_unit["y"] - action["y"]) * 100.0
+
+                        elif goal == "ATTACK_RUN":
+                            dist_before = self.get_path_distance(acting_unit["x"], acting_unit["y"], target_coords)
+                            dist_after = self.get_path_distance(action["x"], action["y"], target_coords)
+                            mod += (dist_before - dist_after) * 200.0
+                            if (action["x"], action["y"]) in self.engine.fortresses or (action["x"], action["y"]) in self.engine.passes:
+                                mod += 300.0
+
+                        elif goal == "DEFEND":
+                            possessions = list(self.engine.arsenals[self.side]) + [(r["x"], r["y"]) for r in ai_units if "relay" in r.get("type", "").lower()]
+                            if possessions:
+                                dist_before = min(self.get_path_distance(acting_unit["x"], acting_unit["y"], p) for p in possessions)
+                                dist_after = min(self.get_path_distance(action["x"], action["y"], p) for p in possessions)
+                                if dist_after in [1, 2]:
+                                    mod += 500.0 # Shield position
+                                elif dist_after < dist_before:
+                                    mod += 200.0
+                                if (action["x"], action["y"]) in self.engine.fortresses:
+                                    mod += 300.0
+
+                        elif goal == "TRAVEL":
+                            travel_target = target_coords if mentality != "DEFENSIVE" else list(self.engine.arsenals[self.side])[0]
+                            dist_before = self.get_path_distance(acting_unit["x"], acting_unit["y"], travel_target)
+                            dist_after = self.get_path_distance(action["x"], action["y"], travel_target)
+                            mod += (dist_before - dist_after) * 150.0
+
+                        elif goal == "STAY":
+                            dist_moved = max(abs(acting_unit["x"] - action["x"]), abs(acting_unit["y"] - action["y"]))
+                            if dist_moved > 0:
+                                mod -= 200.0
+
+                if acting_unit:
+                    dist_moved = max(abs(acting_unit["x"] - action["x"]), abs(acting_unit["y"] - action["y"]))
+                    if dist_moved <= 1:
+                        mod += 0.0 if self.macro_state in ["ANNIHILATION_HUNT", "DESPERATION_CHOKE"] else 15.0
 
             my_breakdown = self.evaluate_board(temp, return_breakdown=True, base_enemy_connected=base_enemy_connected)
 
-            # If the base structural move already results in severe regression, skip calculating enemy POV entirely
             if my_breakdown["TOTAL"] + mod < best_score - 500.0:
                 continue
 
@@ -664,7 +1148,6 @@ class WarGameAI:
             else:
                 score = my_breakdown["TOTAL"] + mod
 
-            # Capture data context if unit belongs to an active anomaly detection flag
             anomaly_type = self._detect_behavioral_anomaly(act_uid) if act_uid else None
             if anomaly_type:
                 if act_uid not in diagnostic_log:
@@ -676,43 +1159,34 @@ class WarGameAI:
                     "breakdown": my_breakdown
                 })
 
+                recent_pos = set(self.position_history.get(act_uid, [])[-4:])
+                if action["action_type"] == "move" and (action["x"], action["y"]) in recent_pos:
+                    score -= 1200.0
+
             if score > best_score:
                 best_score = score
                 best_action = action
 
-        # --- RUN CONSOLE PRINT INTERCEPT FOR DETECTED ANOMALIES ---
         for uid, data in diagnostic_log.items():
             ref_unit = next(u for u in units if u["id"] == uid)
             print("\n" + "=" * 80, file=sys.stderr)
-            print(
-                f"⚠️ DIAGNOSTIC ALERT: Unit ID {uid} [{ref_unit['type'].upper()}] at ({ref_unit['x']}, {ref_unit['y']}) is in state: {data['anomaly']}",
-                file=sys.stderr)
+            print(f"⚠️ DIAGNOSTIC ALERT: Unit ID {uid} [{ref_unit['type'].upper()}] at ({ref_unit['x']}, {ref_unit['y']}) is in state: {data['anomaly']}", file=sys.stderr)
             print(f"Macro Strategy Context: {self.macro_state}", file=sys.stderr)
             print(f"Historical Positions Tracking Queue: {self.position_history[uid]}", file=sys.stderr)
             print("-" * 80, file=sys.stderr)
-            print(
-                f"{'PROPOSED TARGET':<18} | {'FINAL SCORE':<12} | {'ROLE EVAL':<10} | {'COHESION':<10} | {'THREATS':<10} | {'MODIFIER':<10}",
-                file=sys.stderr)
+            print(f"{'PROPOSED TARGET':<18} | {'FINAL SCORE':<12} | {'ROLE EVAL':<10} | {'COHESION':<10} | {'THREATS':<10} | {'MODIFIER':<10}", file=sys.stderr)
             print("-" * 80, file=sys.stderr)
 
-            # Sort choices by score descending to see what won versus what lost
             sorted_choices = sorted(data["choices"], key=lambda c: c["score"], reverse=True)
             for choice in sorted_choices:
                 act = choice["action"]
                 bd = choice["breakdown"]
-                tgt = f"{act['action_type'].upper()} -> ({act['x']}, {act['y']})" if act[
-                                                                                         'action_type'] != 'end_turn' else "END_TURN"
-                print(
-                    f"{tgt:<18} | {choice['score']:<12.1f} | {bd['Role_Exec']:<10.1f} | {bd['Cohesion']:<10.1f} | {bd['Threat_Def']:<10.1f} | {choice['mod_applied']:<10.1f}",
-                    file=sys.stderr)
+                tgt = f"{act['action_type'].upper()} -> ({act['x']}, {act['y']})" if act['action_type'] != 'end_turn' else "END_TURN"
+                print(f"{tgt:<18} | {choice['score']:<12.1f} | {bd['Role_Exec']:<10.1f} | {bd['Cohesion']:<10.1f} | {bd['Threat_Def']:<10.1f} | {choice['mod_applied']:<10.1f}", file=sys.stderr)
 
-            # Print a quick summary of the root cause
             if len(sorted_choices) >= 2:
                 top_choice = sorted_choices[0]
-                # Look for a choice that moves closer to enemy forces/arsenals
-                forward_choices = [c for c in sorted_choices if c['action']['action_type'] == 'move' and
-                                   abs(c['action']['y'] - target_y) < abs(ref_unit['y'] - target_y)]
-
+                forward_choices = [c for c in sorted_choices if c['action']['action_type'] == 'move' and abs(c['action']['y'] - target_y) < abs(ref_unit['y'] - target_y)]
                 if forward_choices and top_choice != forward_choices[0]:
                     f_choice = forward_choices[0]
                     print("\n💡 ROOT CAUSE ANALYSIS:", file=sys.stderr)
@@ -720,21 +1194,24 @@ class WarGameAI:
                     coh_delta = f_choice['breakdown']['Cohesion'] - top_choice['breakdown']['Cohesion']
                     loss_delta = f_choice['mod_applied'] - top_choice['mod_applied']
 
-                    print(
-                        f"   • Forward movement was rejected in favor of {top_choice['action']['action_type'].upper()}.",
-                        file=sys.stderr)
+                    print(f"   • Forward movement was rejected in favor of {top_choice['action']['action_type'].upper()}.", file=sys.stderr)
                     if coh_delta < 0:
-                        print(
-                            f"   • Cohesion Deficit: Moving forward would drop Cohesion score by {abs(coh_delta):.1f} points.",
-                            file=sys.stderr)
+                        print(f"   • Cohesion Deficit: Moving forward would drop Cohesion score by {abs(coh_delta):.1f} points.", file=sys.stderr)
                     if role_delta < 0:
-                        print(
-                            f"   • Role Penalty: Moving forward would lose out on {abs(role_delta):.1f} objective value points.",
-                            file=sys.stderr)
+                        print(f"   • Role Penalty: Moving forward would lose out on {abs(role_delta):.1f} objective value points.", file=sys.stderr)
                     if loss_delta < 0:
-                        print(
-                            f"   • Structural Loss: Move broke lines, triggering a penalty of {abs(loss_delta):.1f} points.",
-                            file=sys.stderr)
+                        print(f"   • Structural Loss: Move broke lines, triggering a penalty of {abs(loss_delta):.1f} points.", file=sys.stderr)
             print("=" * 80 + "\n", file=sys.stderr)
 
+        # If the best action chosen is unproductive (end_turn), but there are other clusters
+        # we haven't evaluated yet, recursively try the next cluster!
+        if best_action and best_action["action_type"] == "end_turn" and cluster_ids:
+            all_clusters = set(sorted(unit_to_cluster.values()))
+            if allowed_clusters is None:
+                allowed_clusters = all_clusters
+            remaining_clusters = allowed_clusters - {chosen_cluster}
+            if remaining_clusters:
+                return self.select_best_action(current_state, allowed_clusters=remaining_clusters)
+
         return best_action if best_action else {"action_type": "end_turn"}
+
