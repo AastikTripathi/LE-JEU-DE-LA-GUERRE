@@ -73,9 +73,9 @@ export default function Lobby({
                 padding: '2px',
                 marginBottom: '20px'
               }}>
-                <button type="button" onClick={() => setGameMode('single')} style={{flex: 1, border: 'none', padding: '8px', fontSize: '9px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer', letterSpacing: '1px', backgroundColor: gameMode === 'single' ? '#002fa7' : 'transparent', color: gameMode === 'single' ? '#ffffff' : '#002fa7', fontWeight: 'bold'}}>SINGLE PLAYER</button>
-                <button type="button" onClick={() => setGameMode('multi')} style={{flex: 1, border: 'none', padding: '8px', fontSize: '9px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer', letterSpacing: '1px', backgroundColor: gameMode === 'multi' ? '#002fa7' : 'transparent', color: gameMode === 'multi' ? '#ffffff' : '#002fa7', fontWeight: 'bold'}}>MULTIPLAYER</button>
-                <button type="button" onClick={() => setGameMode('ai_vs_ai')} style={{flex: 1, border: 'none', padding: '8px', fontSize: '9px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer', letterSpacing: '1px', backgroundColor: gameMode === 'ai_vs_ai' ? '#002fa7' : 'transparent', color: gameMode === 'ai_vs_ai' ? '#ffffff' : '#002fa7', fontWeight: 'bold'}}>AI VS AI</button>
+                <button type="button" onClick={() => setGameMode('single')} style={{ flex: 1, border: 'none', padding: '8px', fontSize: '9px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer', letterSpacing: '1px', backgroundColor: gameMode === 'single' ? '#002fa7' : 'transparent', color: gameMode === 'single' ? '#ffffff' : '#002fa7', fontWeight: 'bold' }}>SINGLE PLAYER</button>
+                <button type="button" onClick={() => setGameMode('multi')} style={{ flex: 1, border: 'none', padding: '8px', fontSize: '9px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer', letterSpacing: '1px', backgroundColor: gameMode === 'multi' ? '#002fa7' : 'transparent', color: gameMode === 'multi' ? '#ffffff' : '#002fa7', fontWeight: 'bold' }}>MULTIPLAYER</button>
+                <button type="button" onClick={() => setGameMode('ai_vs_ai')} style={{ flex: 1, border: 'none', padding: '8px', fontSize: '9px', fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer', letterSpacing: '1px', backgroundColor: gameMode === 'ai_vs_ai' ? '#002fa7' : 'transparent', color: gameMode === 'ai_vs_ai' ? '#ffffff' : '#002fa7', fontWeight: 'bold' }}>AI VS AI</button>
               </div>
 
               {errorMessage && (
@@ -107,19 +107,19 @@ export default function Lobby({
                     </div>
                   </>
                 )}
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   disabled={isConnecting}
-                  style={{ 
-                    backgroundColor: isConnecting ? '#475569' : '#002fa7', 
-                    color: '#ffffff', 
-                    border: '1px solid ' + (isConnecting ? '#475569' : '#002fa7'), 
-                    marginTop: '8px', 
-                    fontSize: '13px', 
-                    letterSpacing: '1px', 
-                    padding: '12px', 
-                    borderRadius: '4px', 
-                    fontWeight: 'bold', 
+                  style={{
+                    backgroundColor: isConnecting ? '#475569' : '#002fa7',
+                    color: '#ffffff',
+                    border: '1px solid ' + (isConnecting ? '#475569' : '#002fa7'),
+                    marginTop: '8px',
+                    fontSize: '13px',
+                    letterSpacing: '1px',
+                    padding: '12px',
+                    borderRadius: '4px',
+                    fontWeight: 'bold',
                     cursor: isConnecting ? 'not-allowed' : 'pointer',
                     transition: 'all 0.15s ease'
                   }}
@@ -130,7 +130,7 @@ export default function Lobby({
             </div>
 
             <div style={{ marginTop: '24px', borderTop: '1px solid #002fa7', paddingTop: '16px', fontSize: '10px', color: '#002fa7', textAlign: 'center' }}>
-              Strategic Command Interface • v2.8.0
+              • v1.0.0
             </div>
           </div>
 
@@ -144,9 +144,9 @@ export default function Lobby({
             textAlign: 'left'
           }}>
             <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start', marginBottom: '14px' }}>
-              <img 
-                src={debordPortrait} 
-                alt="Guy Debord Portrait" 
+              <img
+                src={debordPortrait}
+                alt="Guy Debord Portrait"
                 style={{
                   width: '90px',
                   height: '115px',
@@ -159,12 +159,16 @@ export default function Lobby({
               <div>
                 <h2 style={{ fontSize: '13px', letterSpacing: '2px', color: '#002fa7', margin: '0 0 6px 0', borderBottom: '1px solid #002fa7', paddingBottom: '4px', fontWeight: 'bold' }}>ABOUT THE GAME</h2>
                 <p style={{ fontSize: '10.5px', color: '#1e293b', lineHeight: '1.5', margin: 0 }}>
-                  <strong>A Game of War</strong> (originally <em>Le Jeu de la Guerre</em>) is a digital implementation of the strategic board game designed by <strong>Guy Debord</strong> and <strong>Alice Becker-Ho</strong> in 1965 (originally published in 1987).
+                  <strong>A Game of War</strong> (originally <em>Le Jeu de la Guerre</em>) is a digital implementation of the strategic Clausewitz simulator: board game designed by <strong>Guy Debord</strong> and <strong>Alice Becker-Ho</strong> in 1965 (originally published in 1987).
                 </p>
               </div>
             </div>
-            <p style={{ fontSize: '11px', color: '#1e293b', lineHeight: '1.6', margin: 0 }}>
-              Unlike traditional strategy games that rely on elements of chance, such as dice rolling or card drawing, Le Jeu de la Guerre is completely deterministic. It features a unique combat system where maintaining supply lines is as vital as direct tactical engagements. The game rewards asymmetrical maneuvering, blocking enemy communications, and achieving victory through non-lethal encirclement—neutralizing entire armies by severing their connection to their arsenals.
+            <p style={{ fontSize: '10px', color: '#1e293b', lineHeight: '1.4', margin: 0 }}>
+              Guy Debord is celebrated as the chief strategist of the Situationist International and as the author of the searing critique of the media-saturated society of consumer capitalism: The Society of the Spectacle.
+
+              What is much less well known is that after the May ’68 Revolution, Debord and his partner – Alice Becker-Ho – quit Paris and went to live in a remote French village. Over the next two decades, Debord devoted much of the rest of his life to inventing, refining and promoting what he came to regard as his most important project: The Game of War.
+
+              For Debord, The Game of War wasn’t just a game – it was a guide to how people should live their lives within Fordist society. The Game of War is a Napoleonic-era military strategy game where armies must maintain their communications(supply lines) structure to survive and progress.
             </p>
           </div>
         </div>
@@ -183,7 +187,7 @@ export default function Lobby({
           boxSizing: 'border-box',
           textAlign: 'left'
         }}>
-          <h2 style={{ fontSize: '13px', letterSpacing: '2px', color: '#002fa7', margin: '0 0 8px 0', borderBottom: '2px solid #002fa7', paddingBottom: '6px', fontWeight: 'bold' }}>TACTICAL FIELD MANUAL (RULES)</h2>
+          <h2 style={{ fontSize: '13px', letterSpacing: '2px', color: '#002fa7', margin: '0 0 8px 0', borderBottom: '2px solid #002fa7', paddingBottom: '6px', fontWeight: 'bold' }}>RULES OF THE GAME</h2>
           <RulesBook />
         </div>
       </div>
