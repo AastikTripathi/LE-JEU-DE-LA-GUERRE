@@ -302,9 +302,16 @@ class GameEngine:
                 if self.check_line_of_sight(u['x'], u['y'], target_x, target_y, stats['range'], units):
                     contributing_units.add(u['id'])
 
+        connected_attackers = self.get_connected_units(units, attacker_side)
+        connected_defenders = self.get_connected_units(units, target_unit['side'])
+
         # Sum total offense of contributing units
+        has_connected_attacker = False
         for u_id in contributing_units:
             u = next(unit for unit in units if unit['id'] == u_id)
+            if u['id'] not in connected_attackers:
+                continue
+            has_connected_attacker = True
             stats = self.get_stats(u['type'])
             is_adjacent = max(abs(u['x'] - target_x), abs(u['y'] - target_y)) == 1
             is_fortified = (target_x, target_y) in self.fortresses or (target_x, target_y) in self.passes
@@ -314,62 +321,60 @@ class GameEngine:
             else:
                 total_offense += stats['offense']
 
-        target_stats = self.get_stats(target_unit['type'])
-        total_defense = target_stats['defense']
+        if not has_connected_attacker:
+            return {"valid": False, "reason": "No connected friendly unit in range to attack this target."}
 
-        if (target_x, target_y) in self.fortresses:
-            total_defense += 4
-        elif (target_x, target_y) in self.passes:
-            total_defense += 2
+        target_stats = self.get_stats(target_unit['type'])
+        target_connected = target_unit['id'] in connected_defenders
+        
+        if not target_connected:
+            total_defense = 0
+        else:
+            total_defense = target_stats['defense']
+            if (target_x, target_y) in self.fortresses:
+                total_defense += 4
+            elif (target_x, target_y) in self.passes:
+                total_defense += 2
 
         contributing_defenders = set()
 
-        # Scan 8 directions from target to find aligned defending stacks
-        for dx, dy in self.directions:
-            line_friendlies = []
-            cx, cy = target_x + dx, target_y + dy
+        # Determine the directions from which attacks are actually incoming
+        active_attack_directions = set()
+        for u_id in contributing_units:
+            u = next(unit for unit in units if unit['id'] == u_id)
+            if u['id'] not in connected_attackers:
+                continue
+            diff_x = u['x'] - target_x
+            diff_y = u['y'] - target_y
+            dx = 0 if diff_x == 0 else diff_x // abs(diff_x)
+            dy = 0 if diff_y == 0 else diff_y // abs(diff_y)
+            active_attack_directions.add((dx, dy))
+
+        # Scan directly behind the defender along the axis of attack
+        for dx, dy in active_attack_directions:
+            cx, cy = target_x - dx, target_y - dy
             while 0 <= cx < self.cols and 0 <= cy < self.rows:
                 if (cx, cy) in self.mountains:
                     break
-                
                 u = next((unit for unit in units if unit['x'] == cx and unit['y'] == cy), None)
-                if u:
-                    if u['side'] == target_unit['side'] and u['id'] != target_unit['id']:
-                        line_friendlies.append(u)
-                    else:
-                        break
-                else:
-                    if line_friendlies:
-                        if len(line_friendlies) >= 2:
-                            for lf in line_friendlies:
-                                contributing_defenders.add(lf['id'])
-                        line_friendlies = []
-                cx += dx
-                cy += dy
-            if len(line_friendlies) >= 2:
-                for lf in line_friendlies:
-                    contributing_defenders.add(lf['id'])
-
-        # Add single units that have line of sight within their base range
-        for u in units:
-            if u['side'] == target_unit['side'] and u['id'] != target_unit['id']:
-                stats = self.get_stats(u['type'])
-                if self.check_line_of_sight(u['x'], u['y'], target_x, target_y, stats['range'], units):
+                if u and u['side'] == target_unit['side']:
                     contributing_defenders.add(u['id'])
+                else:
+                    break
+                cx -= dx
+                cy -= dy
 
         # Sum defense support
         for u_id in contributing_defenders:
             u = next(unit for unit in units if unit['id'] == u_id)
+            if u['id'] not in connected_defenders:
+                continue
             stats = self.get_stats(u['type'])
             total_defense += stats['defense']
 
         # Double entire defense (base + support) if in a fortress or mountain pass
-        if (target_x, target_y) in self.fortresses or (target_x, target_y) in self.passes:
+        if target_connected and ((target_x, target_y) in self.fortresses or (target_x, target_y) in self.passes):
             total_defense *= 2
-
-        target_connected = target_unit['id'] in self.get_connected_units(units, target_unit['side'])
-        if not target_connected:
-            total_defense = max(1, total_defense // 2)
 
         net_force = total_offense - total_defense
 
