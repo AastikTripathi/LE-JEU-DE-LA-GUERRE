@@ -568,11 +568,11 @@ class WarGameAI:
                     if max(abs(ex - ax), abs(ey - ay)) <= reach:
                         converging_friendly_count += 1
                 if converging_friendly_count == 1:
-                    stacked_attack_pressure += 10.0
+                    stacked_attack_pressure += 100.0
                 elif converging_friendly_count == 2:
-                    stacked_attack_pressure += 40.0
+                    stacked_attack_pressure += 1500.0
                 elif converging_friendly_count >= 3:
-                    stacked_attack_pressure += 80.0
+                    stacked_attack_pressure += 5000.0
 
         all_enemy_positions = [(e.get("x", 0), e.get("y", 0)) for e in enemy_units]
 
@@ -785,10 +785,11 @@ class WarGameAI:
     def get_all_legal_moves(self, units: list, moved_this_turn: list) -> list:
         legal_actions = []
         ai_units = [u for u in units if u.get("side") == self.side]
-
-
+        connected_unit_ids = self.engine.get_connected_units(units, self.side)
 
         for unit in ai_units:
+            if unit["id"] not in connected_unit_ids:
+                continue
             if unit["id"] in moved_this_turn:
                 continue
 
@@ -927,9 +928,58 @@ class WarGameAI:
             mod = 0.0
             act_uid = action.get("unitId")
 
+            if act_uid and action["action_type"] == "move":
+                has_stuck_unit = any(self._detect_behavioral_anomaly(u["id"]) is not None for u in ai_units)
+                if has_stuck_unit:
+                    acting_anomaly = self._detect_behavioral_anomaly(act_uid)
+                    if not acting_anomaly:
+                        mod += 15000.0
+
             acting_unit = next((u for u in units if u["id"] == act_uid), None)
             if not acting_unit and action["action_type"] != "end_turn":
                 continue
+
+            # Arsenal defense and cut-off pursuit logic
+            if acting_unit and "relay" not in acting_unit.get("type", "").lower():
+                our_arsenals = self.engine.arsenals[self.side]
+                threatening_enemies = []
+                for e in enemy_units:
+                    for ax, ay in our_arsenals:
+                        if max(abs(e["x"] - ax), abs(e["y"] - ay)) <= 6:
+                            threatening_enemies.append(e)
+                            break
+
+                if threatening_enemies:
+                    # Find closest friendly combat units to the threats to partition response
+                    combat_units = [u for u in ai_units if "relay" not in u.get("type", "").lower()]
+                    defenders_assigned = set()
+                    for e in threatening_enemies:
+                        if combat_units:
+                            closest_u = min(combat_units, key=lambda cu: max(abs(cu["x"] - e["x"]), abs(cu["y"] - e["y"])))
+                            defenders_assigned.add(closest_u["id"])
+
+                    if acting_unit["id"] in defenders_assigned:
+                        if action["action_type"] == "attack":
+                            # If the attack is targeting one of these threatening enemies, reward it massively
+                            if any(e["x"] == action["x"] and e["y"] == action["y"] for e in threatening_enemies):
+                                mod += 150000.0  # Clear Arsenal Threat Kill Order!
+                        elif action["action_type"] == "move":
+                            try:
+                                before_connected = self.engine.get_connected_units(units, self.side)
+                                after_connected = self.engine.get_connected_units(temp, self.side)
+                                is_self_connected = acting_unit["id"] in after_connected
+                                breaks_ally_supply = len(before_connected - after_connected) > 0
+                            except:
+                                is_self_connected = True
+                                breaks_ally_supply = False
+
+                            if is_self_connected and not breaks_ally_supply:
+                                min_dist_before = min(max(abs(acting_unit["x"] - e["x"]), abs(acting_unit["y"] - e["y"])) for e in threatening_enemies)
+                                min_dist_after = min(max(abs(action["x"] - e["x"]), abs(action["y"] - e["y"])) for e in threatening_enemies)
+                                if min_dist_after < min_dist_before:
+                                    mod += 40000.0  # Reward moving to intercept threat
+                                elif min_dist_after > min_dist_before:
+                                    mod -= 20000.0  # Penalize moving away from arsenal threat
 
             if action["action_type"] == "attack":
                 if attack_executed: continue
@@ -941,6 +991,10 @@ class WarGameAI:
                     if target_unit:
                         target_connected = target_unit["id"] in self.engine.get_connected_units(temp, self.enemy_side)
                         is_target_cutoff = not target_connected
+                    if is_target_cutoff:
+                        mod += 80000.0  # Massive priority to eliminate cut-off units!
+                    if target_unit and "relay" in target_unit.get("type", "").lower():
+                        mod += 150000.0  # Chess Queen priority bonus to destroy enemy Relays!
 
                     if combat["result"] == "DESTROY":
                         # Shoot to kill: large destroy bonus
@@ -975,6 +1029,49 @@ class WarGameAI:
                 for u in temp:
                     if u.get("id") == act_uid:
                         u["x"], u["y"] = action["x"], action["y"]
+
+                # ── DYNAMIC POTENTIAL RISK ASSESSMENT (FEAR OF CERTAIN DEATH) ──
+                try:
+                    enemy_potential_threat_power = 0.0
+                    for e in enemy_units:
+                        # Only connected enemies pose active threats
+                        if e["id"] in base_enemy_connected:
+                            e_type = e.get("type", "").lower()
+                            if "relay" in e_type:
+                                continue
+                            e_stats = self.get_stats(e_type)
+                            e_move = 2 if "cavalry" in e_type else 1
+                            e_range = e_stats["range"]
+                            # Chebyshev distance check
+                            dist_to_dest = max(abs(e["x"] - action["x"]), abs(e["y"] - action["y"]))
+                            if dist_to_dest <= e_move + e_range:
+                                enemy_potential_threat_power += e_stats["offense"]
+
+                    if enemy_potential_threat_power > 0:
+                        friendly_potential_support_power = 0.0
+                        for a in ai_units:
+                            if a["id"] != act_uid and a["id"] in base_my_connected:
+                                a_type = a.get("type", "").lower()
+                                if "relay" in a_type:
+                                    continue
+                                a_stats = self.get_stats(a_type)
+                                a_move = 2 if "cavalry" in a_type else 1
+                                dist_to_dest = max(abs(a["x"] - action["x"]), abs(a["y"] - action["y"]))
+                                if dist_to_dest <= a_move + 1:
+                                    friendly_potential_support_power += a_stats["offense"]
+
+                        acting_stats = self.get_stats(acting_unit.get("type", "").lower())
+                        total_friendly_power = friendly_potential_support_power + acting_stats["offense"]
+
+                        if friendly_potential_support_power == 0.0:
+                            # Charging alone into enemy potential threat reach is suicidal
+                            mod -= 50000.0
+
+                        if enemy_potential_threat_power > total_friendly_power:
+                            # Outnumbered in potential threat reach
+                            mod -= (enemy_potential_threat_power - total_friendly_power) * 1200.0
+                except:
+                    pass
 
                 # ── STRATEGIC SUPPLY-LINE INTERCEPTION (NON-LETHAL KILLS) ──
                 try:
@@ -1049,7 +1146,6 @@ class WarGameAI:
                             allies_adjacent = sum(1 for a in ai_units if "relay" not in a.get("type", "").lower() and max(abs(action["x"] - a["x"]), abs(action["y"] - a["y"])) <= 1)
                             mod += allies_adjacent * 250.0
                         else:
-                            # SUPPORT_NET mode: keep supply line connected, reward extensions
                             try:
                                 before_connected = self.engine.get_connected_units(units, self.side)
                                 after_connected = self.engine.get_connected_units(temp, self.side)
@@ -1063,6 +1159,14 @@ class WarGameAI:
                                         else:
                                             mod += 2000.0  # Big bonus to reconnect combat units
                                 mod -= len(newly_disconnected) * 2500.0
+
+                                # Relay supply rule constraints
+                                was_connected = acting_unit["id"] in before_connected
+                                is_connected_now = acting_unit["id"] in after_connected
+                                if not was_connected and is_connected_now:
+                                    mod += 80000.0  # High priority to reconnect this Relay to the supply network!
+                                elif not is_connected_now:
+                                    mod -= 100000.0  # Massive penalty for the Relay staying offline or moving out of supply!
                             except:
                                 pass
 
@@ -1159,9 +1263,25 @@ class WarGameAI:
                     "breakdown": my_breakdown
                 })
 
-                recent_pos = set(self.position_history.get(act_uid, [])[-4:])
-                if action["action_type"] == "move" and (action["x"], action["y"]) in recent_pos:
-                    score -= 1200.0
+                if anomaly_type == "STASIS_FREEZE":
+                    u_temp = next((ut for ut in temp if ut["id"] == act_uid), None)
+                    if u_temp and u_temp["x"] == acting_unit["x"] and u_temp["y"] == acting_unit["y"]:
+                        score -= 200000.0
+                elif anomaly_type in ["2_STEP_OSCILLATION", "3_STEP_OSCILLATION"]:
+                    recent_pos = set(self.position_history.get(act_uid, [])[-4:])
+                    if action["action_type"] == "move" and (action["x"], action["y"]) in recent_pos:
+                        score -= 200000.0
+
+            # Apply stasis stagnation penalty if stuck units remain stationary in this candidate state
+            stagnation_penalty = 0.0
+            for u in units:
+                if u.get("side") == self.side:
+                    anomaly = self._detect_behavioral_anomaly(u["id"])
+                    if anomaly:
+                        u_temp = next((ut for ut in temp if ut["id"] == u["id"]), None)
+                        if u_temp and u_temp["x"] == u["x"] and u_temp["y"] == u["y"]:
+                            stagnation_penalty += 35000.0
+            score -= stagnation_penalty
 
             if score > best_score:
                 best_score = score
