@@ -34,6 +34,7 @@ export default function App() {
   const [attackExecuted, setAttackExecuted] = useState(false);
   const [locCells, setLocCells] = useState({ North: [], South: [] });
   const [connectedUnitIds, setConnectedUnitIds] = useState([]);
+  const [movedUnitsThisTurn, setMovedUnitsThisTurn] = useState([]);
   const [selectedUnitId, setSelectedUnitId] = useState(null);
   const [socket, setSocket] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
@@ -43,6 +44,9 @@ export default function App() {
   // Telemetry, Animations & Graveyard State Tracking
   const [hoveredCell, setHoveredCell] = useState(null);
   const [xKeyHeld, setXKeyHeld] = useState(false);
+  const [zKeyHeld, setZKeyHeld] = useState(false);
+  const [sKeyHeld, setSKeyHeld] = useState(false);
+  const [isAttackStack, setIsAttackStack] = useState(false);
   const [shiftKeyHeld, setShiftKeyHeld] = useState(false);
   const [multiSelectedIds, setMultiSelectedIds] = useState([]);
   const [tracers, setTracers] = useState([]);          // moving projectile dots
@@ -155,6 +159,20 @@ export default function App() {
   border: 2px dashed #10b981 !important;
   z-index: 10 !important;
 }
+.cell-reachable {
+  --glow-color: #10b981;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px solid #10b981 !important;
+  z-index: 5 !important;
+  background-color: rgba(16, 185, 129, 0.15) !important;
+}
+.cell-attack-range {
+  --glow-color: #ef4444;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px solid #ef4444 !important;
+  z-index: 5 !important;
+  background-color: rgba(239, 68, 68, 0.15) !important;
+}
     `;
     document.head.appendChild(styleSheet);
     return () => styleSheet.remove();
@@ -164,10 +182,14 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key.toLowerCase() === 'x') setXKeyHeld(true);
+      if (e.key.toLowerCase() === 'z') setZKeyHeld(true);
+      if (e.key.toLowerCase() === 's') setSKeyHeld(true);
       if (e.key === 'Shift') setShiftKeyHeld(true);
     };
     const handleKeyUp = (e) => {
       if (e.key.toLowerCase() === 'x') setXKeyHeld(false);
+      if (e.key.toLowerCase() === 'z') setZKeyHeld(false);
+      if (e.key.toLowerCase() === 's') setSKeyHeld(false);
       if (e.key === 'Shift') setShiftKeyHeld(false);
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -338,6 +360,7 @@ export default function App() {
         setAttackExecuted(data.attackExecuted ?? false);
         setLocCells(data.linesOfCommunication || { North: [], South: [] });
         setConnectedUnitIds(data.connectedUnitIds || []);
+        setMovedUnitsThisTurn(data.movedUnitsThisTurn || []);
         setCanUndo(data.canUndo ?? false);
 
         if (data.yourSide) setMySide(data.yourSide);
@@ -425,30 +448,82 @@ export default function App() {
 
     if (clickedUnit) {
       if (clickedUnit.side === turn) {
-        if (xKeyHeld) {
-          if (shiftKeyHeld) {
-            // Select the entire contiguous connected shape
-            const comp = getConnectedComponent(clickedUnit, units);
-            setMultiSelectedIds(comp.map(u => u.id));
+        if (!connectedUnitIds.includes(clickedUnit.id)) {
+          return;
+        }
+        if (sKeyHeld) {
+          if (isAdjacentToSelection(clickedUnit, multiSelectedIds, units)) {
+            setIsAttackStack(true);
+            if (shiftKeyHeld) {
+              const comp = getConnectedComponent(clickedUnit, units);
+              setMultiSelectedIds(comp.map(u => u.id));
+            } else {
+              setMultiSelectedIds(prev =>
+                prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
+              );
+            }
           } else {
-            setMultiSelectedIds(prev =>
-              prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
-            );
+            setSelectedUnitId(null);
+            setMultiSelectedIds([]);
+          }
+        } else if (xKeyHeld) {
+          if (isAdjacentToSelection(clickedUnit, multiSelectedIds, units)) {
+            setIsAttackStack(false);
+            if (shiftKeyHeld) {
+              const comp = getConnectedComponent(clickedUnit, units);
+              setMultiSelectedIds(comp.map(u => u.id));
+            } else {
+              setMultiSelectedIds(prev =>
+                prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
+              );
+            }
+          } else {
+            setSelectedUnitId(null);
+            setMultiSelectedIds([]);
           }
         } else {
+          setIsAttackStack(true);
           setSelectedUnitId(clickedUnit.id === selectedUnitId ? null : clickedUnit.id);
           setMultiSelectedIds(clickedUnit.id === selectedUnitId ? [] : [clickedUnit.id]);
         }
-      } else if ((selectedUnitId || multiSelectedIds.length > 0) && socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: 'attack', x, y }));
-        setSelectedUnitId(null);
-        setMultiSelectedIds([]);
+      } else {
+        if (zKeyHeld) {
+          if (isAdjacentToSelection(clickedUnit, multiSelectedIds, units)) {
+            setIsAttackStack(false);
+            setSelectedUnitId(null); // Clear friendly selection when selecting enemies
+            if (shiftKeyHeld) {
+              const comp = getConnectedComponent(clickedUnit, units);
+              setMultiSelectedIds(comp.map(u => u.id));
+            } else {
+              setMultiSelectedIds(prev =>
+                prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
+              );
+            }
+          } else {
+            setSelectedUnitId(null);
+            setMultiSelectedIds([]);
+          }
+        } else if ((selectedUnitId || (multiSelectedIds.length > 0 && isAttackStack)) && socket?.readyState === WebSocket.OPEN) {
+          if (isEnemyInAttackRange(x, y)) {
+            socket.send(JSON.stringify({ action: 'attack', x, y }));
+          }
+          setSelectedUnitId(null);
+          setMultiSelectedIds([]);
+        } else {
+          setSelectedUnitId(null);
+          setMultiSelectedIds([]);
+        }
       }
       return;
     }
 
     if (selectedUnitId && socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ action: 'move', unitId: selectedUnitId, x, y }));
+      if (reachableCells.includes(`${x},${y}`)) {
+        socket.send(JSON.stringify({ action: 'move', unitId: selectedUnitId, x, y }));
+      }
+      setSelectedUnitId(null);
+      setMultiSelectedIds([]);
+    } else {
       setSelectedUnitId(null);
       setMultiSelectedIds([]);
     }
@@ -483,6 +558,104 @@ export default function App() {
     return coords.some(coord => coord[0] === x && coord[1] === y);
   };
 
+  const isAdjacentToSelection = (unit, selectedIds, units) => {
+    if (selectedIds.length === 0) return true;
+    const selectedUnits = units.filter(u => selectedIds.includes(u.id));
+    return selectedUnits.some(su => {
+      const dx = Math.abs(su.x - unit.x);
+      const dy = Math.abs(su.y - unit.y);
+      return dx <= 1 && dy <= 1;
+    });
+  };
+
+  const checkLineOfSight = (fromX, fromY, toX, toY, maxRange) => {
+    const distance = Math.max(Math.abs(toX - fromX), Math.abs(toY - fromY));
+    if (distance > maxRange || distance === 0) return false;
+
+    let x0 = fromX;
+    let y0 = fromY;
+    const x1 = toX;
+    const y1 = toY;
+
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+
+    let cx = x0;
+    let cy = y0;
+    while (true) {
+      if ((cx !== x0 || cy !== y0) && (cx !== x1 || cy !== y1)) {
+        if (GET_TERRAIN(cx, cy).type === 'mountain') {
+          return false;
+        }
+      }
+      if (cx === x1 && cy === y1) break;
+
+      const e2 = 2 * err;
+      if (e2 > -dy) {
+        err -= dy;
+        cx += sx;
+      }
+      if (e2 < dx) {
+        err += dx;
+        cy += sy;
+      }
+    }
+    return true;
+  };
+
+  const getReachableTiles = (unit) => {
+    if (!unit) return [];
+    if (!connectedUnitIds.includes(unit.id)) return [];
+    if (movedUnitsThisTurn.includes(unit.id)) return [];
+
+    const unitType = unit.type.toLowerCase();
+    const speed = unitType === 'cavalry' ? 2 : 1;
+    const startX = unit.x;
+    const startY = unit.y;
+
+    const queue = [{ x: startX, y: startY, dist: 0 }];
+    const visited = new Set([`${startX},${startY}`]);
+    const reachable = [];
+
+    const isMountain = (cx, cy) => GET_TERRAIN(cx, cy).type === 'mountain';
+    const isOccupied = (cx, cy) => units.some(u => u.x === cx && u.y === cy);
+
+    while (queue.length > 0) {
+      const { x: cx, y: cy, dist } = queue.shift();
+
+      if (dist > 0) {
+        if (!isMountain(cx, cy) && !isOccupied(cx, cy)) {
+          reachable.push(`${cx},${cy}`);
+        }
+      }
+
+      if (dist >= speed) continue;
+
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+            const key = `${nx},${ny}`;
+            if (!isMountain(nx, ny) && !visited.has(key)) {
+              visited.add(key);
+              queue.push({ x: nx, y: ny, dist: dist + 1 });
+            }
+          }
+        }
+      }
+    }
+
+    return reachable;
+  };
+
+  const selectedUnit = selectedUnitId ? units.find(u => u.id === selectedUnitId) : null;
+  const reachableCells = (selectedUnit && isMyTurn && multiSelectedIds.length <= 1 && !sKeyHeld) ? getReachableTiles(selectedUnit) : [];
+
   const cells = [];
   for (let y = 0; y < ROWS; y++) {
     for (let x = 0; x < COLS; x++) {
@@ -491,7 +664,8 @@ export default function App() {
         terrain: GET_TERRAIN(x, y),
         occupyingUnit: unitPositionsMap[`${x},${y}`],
         isNorthLoc: isCellInLoc(x, y, 'North'),
-        isSouthLoc: isCellInLoc(x, y, 'South')
+        isSouthLoc: isCellInLoc(x, y, 'South'),
+        isReachable: reachableCells.includes(`${x},${y}`)
       });
     }
   }
@@ -519,6 +693,7 @@ export default function App() {
   const isEnemyInAttackRange = (cellX, cellY) => {
     const targetUnit = unitPositionsMap[`${cellX},${cellY}`];
     if (!targetUnit || targetUnit.side === turn) return false;
+    if (attackExecuted) return false;
 
     if (stackOrientation) {
       const { stepX, stepY, sorted } = stackOrientation;
@@ -526,10 +701,10 @@ export default function App() {
       const crossProduct = (cellY - first.y) * stepX - (cellX - first.x) * stepY;
       if (crossProduct !== 0) return false;
 
-      // Find the unit in the stack closest to the target coordinate (the attacker head)
       let head = null;
       let minDistance = Infinity;
       for (const u of sorted) {
+        if (!connectedUnitIds.includes(u.id)) continue; // Disconnected units cannot attack
         const dist = Math.max(Math.abs(u.x - cellX), Math.abs(u.y - cellY));
         if (dist < minDistance) {
           minDistance = dist;
@@ -538,14 +713,15 @@ export default function App() {
       }
 
       if (!head) return false;
-      const headRange = head.type?.toLowerCase() === 'artillery' ? 3 : 2;
-      return minDistance <= headRange;
+      const headRange = head.type?.toLowerCase() === 'artillery' ? 3 : (head.type?.toLowerCase() === 'relay' ? 0 : 2);
+      return checkLineOfSight(head.x, head.y, cellX, cellY, headRange);
     } else if (selectedUnitId) {
+      if (!connectedUnitIds.includes(selectedUnitId)) return false; // Disconnected unit cannot attack
       const origin = units.find(u => u.id === selectedUnitId);
       if (!origin) return false;
 
-      const maxRange = origin.type?.toLowerCase() === 'artillery' ? 3 : 2;
-      return Math.abs(cellX - origin.x) <= maxRange && Math.abs(cellY - origin.y) <= maxRange;
+      const maxRange = origin.type?.toLowerCase() === 'artillery' ? 3 : (origin.type?.toLowerCase() === 'relay' ? 0 : 2);
+      return checkLineOfSight(origin.x, origin.y, cellX, cellY, maxRange);
     }
     return false;
   };
@@ -555,11 +731,10 @@ export default function App() {
     const base = UNIT_PROFILES[unit.type.toLowerCase()] || { attack: 10, defense: 10, label: "Asset" };
     const isConnected = connectedUnitIds.includes(unit.id);
 
-    // Penalize cut-off units: halved operational defense profile (can still attack normally)
     return {
       ...base,
-      attack: base.attack,
-      currentDefense: isConnected ? base.defense : Math.round(base.defense * 0.5),
+      attack: isConnected ? base.attack : 0,
+      currentDefense: isConnected ? base.defense : 0,
       isConnected
     };
   };
@@ -769,14 +944,9 @@ export default function App() {
                     <div style={{ 
                       fontWeight: 'bold', 
                       marginTop: '2px',
-                      color: isSelectionConnected(multiSelectedIds) 
-                        ? (stackOrientation ? '#10b981' : '#002fa7') 
-                        : '#991b1b' 
+                      color: stackOrientation ? '#10b981' : '#002fa7'
                     }}>
-                      {isSelectionConnected(multiSelectedIds) 
-                        ? (stackOrientation ? "✓ ALIGNED STACK (COMBINED FIRE)" : "✓ CONNECTED SHAPE GROUP") 
-                        : "✗ DISCONNECTED GROUP"
-                      }
+                      {stackOrientation ? "✓ ALIGNED STACK (COMBINED FIRE)" : "✓ CONNECTED SHAPE GROUP"}
                     </div>
                   )}
                 </div>
@@ -809,6 +979,13 @@ export default function App() {
                   <div style={{ color: hoveredStats.isConnected ? '#002fa7' : '#991b1b', fontWeight: 'bold', marginTop: '2px' }}>
                     {hoveredStats.isConnected ? "✓ SUPPLY CONNECTED" : "✗ OUT OF SUPPLY"}
                   </div>
+                </div>
+                <div style={{ marginTop: '10px', paddingTop: '6px', borderTop: '1px dashed #cbd5e1', fontSize: '9px', color: '#64748b', fontStyle: 'italic', lineHeight: '1.4' }}>
+                  {hoveredUnit.side === turn ? (
+                    "💡 Hold X + Click to view group stats, or Hold S + Click to form an attacking stack (add Shift to select connected groups)."
+                  ) : (
+                    "💡 Hold Z + Click to view enemy group stats (add Shift to select connected groups)."
+                  )}
                 </div>
               </div>
             ) : (
@@ -879,7 +1056,7 @@ export default function App() {
                 />
               ))}
 
-              {cells.map(({ x, y, terrain, occupyingUnit, isNorthLoc, isSouthLoc }) => {
+              {cells.map(({ x, y, terrain, occupyingUnit, isNorthLoc, isSouthLoc, isReachable }) => {
                 const isSelected = occupyingUnit && occupyingUnit.id === selectedUnitId;
                 const isMultiSelected = occupyingUnit && multiSelectedIds.includes(occupyingUnit.id);
                 const isUnitConnected = occupyingUnit && connectedUnitIds.includes(occupyingUnit.id);
@@ -895,6 +1072,10 @@ export default function App() {
                   cellClass = "cell-selected-active";
                 } else if (isMultiSelected) {
                   cellClass = stackOrientation ? "cell-selected-multi-stack" : "cell-selected-multi-shape";
+                } else if (isReachable) {
+                  cellClass = "cell-reachable";
+                } else if (inRange) {
+                  cellClass = "cell-attack-range";
                 }
 
                 return (
@@ -907,9 +1088,9 @@ export default function App() {
                     onMouseLeave={() => setHoveredCell(null)}
                     style={{
                       ...styles.cell,
-                      backgroundColor: inRange ? 'rgba(153, 27, 27, 0.2)' : terrain.color,
-                      border: inRange ? '1px solid #991b1b' : (terrain.border || '1px solid #cbd5e1'),
-                      boxShadow: inRange ? 'inset 0 0 10px rgba(153, 27, 27, 0.15)' : 'none',
+                      backgroundColor: inRange ? 'rgba(239, 68, 68, 0.15)' : (isReachable ? 'rgba(16, 185, 129, 0.15)' : terrain.color),
+                      border: inRange ? '2px solid #ef4444' : (isReachable ? '2px solid #10b981' : (terrain.border || '1px solid #cbd5e1')),
+                      boxShadow: inRange ? 'inset 0 0 10px rgba(239, 68, 68, 0.15)' : (isReachable ? 'inset 0 0 10px rgba(16, 185, 129, 0.15)' : 'none'),
                       cursor: isMyTurn ? 'pointer' : 'default'
                     }}
                   >
@@ -1034,15 +1215,14 @@ const styles = {
   input: { backgroundColor: '#fdfbe6', border: '1px solid #002fa7', borderRadius: '4px', color: '#002fa7', padding: '8px 12px', fontSize: '12px', fontFamily: 'monospace', outline: 'none' },
   lobbyButton: { backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', padding: '10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' },
 
-  // Hard height thresholds to lock UI jumping
-  header: { width: '100%', maxWidth: '1280px', height: '62px', minHeight: '62px', maxHeight: '62px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid #002fa7', paddingBottom: '12px', gap: '12px', boxSizing: 'border-box' },
+  header: { width: '100%', maxWidth: '1280px', minHeight: '62px', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid #002fa7', paddingBottom: '12px', gap: '16px', boxSizing: 'border-box' },
   headerTitleSection: { display: 'flex', flexDirection: 'column' },
-  title: { fontSize: '18px', letterSpacing: '2px', color: '#002fa7', margin: 0, lineHeight: '1', fontWeight: 'bold' },
+  title: { fontSize: '18px', letterSpacing: '2px', color: '#002fa7', margin: 0, lineHeight: '1.2', fontWeight: 'bold', whiteSpace: 'nowrap' },
   sharePanel: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px', fontSize: '10px', color: '#002fa7' },
   linkInput: { backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', padding: '2px 6px', borderRadius: '4px', width: '150px', fontSize: '10px', outline: 'none' },
-  identityPanel: { display: 'flex', gap: '8px', alignItems: 'center' },
-  playerTag: { display: 'flex', flexDirection: 'column', backgroundColor: '#ffffff', border: '1px solid', borderRadius: '4px', padding: '4px 10px', minWidth: '100px', height: '38px', boxSizing: 'border-box', justifyContent: 'center' },
-  controlPanel: { display: 'flex', gap: '8px', alignItems: 'center' },
+  identityPanel: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' },
+  playerTag: { display: 'flex', flexDirection: 'column', backgroundColor: '#ffffff', border: '1px solid', borderRadius: '4px', padding: '6px 12px', minWidth: '110px', boxSizing: 'border-box', justifyContent: 'center', alignItems: 'center', textAlign: 'center' },
+  controlPanel: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' },
 
   // Fixed button formatting dimensions
   fixedBtn: { backgroundColor: '#ffffff', border: '1px solid #002fa7', color: '#002fa7', width: '80px', height: '34px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
@@ -1062,10 +1242,10 @@ const styles = {
   statRow: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginTop: '4px' },
   statLabel: { color: '#475569' },
 
-  gridContainer: { position: 'relative', flexGrow: 1, display: 'grid', gridTemplateColumns: 'repeat(25, minmax(0, 1fr))', gap: '1px', backgroundColor: '#002fa7', padding: '8px', borderRadius: '6px', border: '1px solid #002fa7' },
+  gridContainer: { position: 'relative', flexGrow: 1, display: 'grid', gridTemplateColumns: 'repeat(25, minmax(0, 1fr))', gap: '1px', backgroundColor: '#cbd5e1', padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' },
   cell: { position: 'relative', aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none', transition: 'background-color 0.15s ease' },
   unitBadge: { width: '80%', height: '80%', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '3px', border: '2px solid', fontWeight: 'bold', fontSize: '12px', zIndex: 2 },
-  locDot: { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: '6px', height: '6px', borderRadius: '50%', zIndex: 1, opacity: 0.8 },
+  locDot: { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: '8px', height: '8px', borderRadius: '50%', zIndex: 1, opacity: 1, boxShadow: '0 0 3px rgba(0,0,0,0.3)' },
   terrainLabel: { fontSize: '9px', opacity: 0.2 },
   coords: { position: 'absolute', bottom: '1px', right: '1px', fontSize: '4.5px', color: '#002fa7', opacity: 0.3 },
 
