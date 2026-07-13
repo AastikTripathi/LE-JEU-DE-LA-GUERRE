@@ -13,7 +13,11 @@ export default function Lobby({
   errorMessage,
   handleConnectToRoom,
   debordPortrait,
-  isConnecting
+  isConnecting,
+  playerSide,
+  setPlayerSide,
+  layoutType,
+  setLayoutType
 }) {
 
   return (
@@ -95,6 +99,82 @@ export default function Lobby({
                   <label style={{ fontSize: '9px', color: '#002fa7', fontWeight: 'bold' }}>TACTICAL CALLSIGN</label>
                   <input type="text" value={playerName} onChange={(e) => setPlayerName(e.target.value)} placeholder="Commander" style={{ backgroundColor: '#fdfbe6', border: '1px solid #002fa7', color: '#002fa7', borderRadius: '4px', padding: '8px 12px', fontSize: '12px', fontFamily: 'monospace', outline: 'none' }} required />
                 </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '9px', color: '#002fa7', fontWeight: 'bold' }}>BOARD LAYOUT TEMPLATE</label>
+                  <div style={{
+                    display: 'flex',
+                    backgroundColor: '#fdfbe6',
+                    border: '1px solid #002fa7',
+                    borderRadius: '4px',
+                    padding: '2px'
+                  }}>
+                    <button
+                      type="button"
+                      onClick={() => setLayoutType('standard')}
+                      style={{
+                        flex: 1, border: 'none', padding: '8px', fontSize: '9px',
+                        fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer',
+                        backgroundColor: layoutType === 'standard' ? '#002fa7' : 'transparent',
+                        color: layoutType === 'standard' ? '#ffffff' : '#002fa7',
+                        fontWeight: 'bold'
+                      }}
+                    >
+                      STANDARD
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLayoutType('random')}
+                      style={{
+                        flex: 1, border: 'none', padding: '8px', fontSize: '9px',
+                        fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer',
+                        backgroundColor: layoutType === 'random' ? '#002fa7' : 'transparent',
+                        color: layoutType === 'random' ? '#ffffff' : '#002fa7',
+                        fontWeight: 'bold'
+                      }}
+                    >
+                      RANDOMIZED
+                    </button>
+                  </div>
+                </div>
+                {gameMode === 'single' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label style={{ fontSize: '9px', color: '#002fa7', fontWeight: 'bold' }}>SELECT YOUR FORCES</label>
+                    <div style={{
+                      display: 'flex',
+                      backgroundColor: '#fdfbe6',
+                      border: '1px solid #002fa7',
+                      borderRadius: '4px',
+                      padding: '2px'
+                    }}>
+                      <button
+                        type="button"
+                        onClick={() => setPlayerSide('North')}
+                        style={{
+                          flex: 1, border: 'none', padding: '8px', fontSize: '9px',
+                          fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer',
+                          backgroundColor: playerSide === 'North' ? '#002fa7' : 'transparent',
+                          color: playerSide === 'North' ? '#ffffff' : '#002fa7',
+                          fontWeight: 'bold'
+                        }}
+                      >
+                        🔵 NORTH (BLUE)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPlayerSide('South')}
+                        style={{
+                          flex: 1, border: 'none', padding: '8px', fontSize: '9px',
+                          fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer',
+                          backgroundColor: playerSide === 'South' ? '#002fa7' : 'transparent',
+                          color: playerSide === 'South' ? '#ffffff' : '#002fa7',
+                          fontWeight: 'bold'
+                        }}
+                      >
+                        🔴 SOUTH (RED)
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {gameMode === 'multi' && (
                   <>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
