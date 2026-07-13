@@ -83,9 +83,8 @@ export default function RulesBook() {
           </p>
           <strong style={{ color: '#002fa7' }}>Isolation (Disconnected) Penalties:</strong>
           <ul style={{ margin: '6px 0 0 16px', padding: 0, listStyleType: 'disc' }}>
-            <li style={{ marginBottom: '4px' }}><strong>Frozen:</strong> Disconnected units are out of supply and cannot execute movement operations.</li>
-            <li style={{ marginBottom: '4px' }}><strong>Vulnerable:</strong> Disconnected units suffer an operational penalty, halving their defense rating when attacked.</li>
-            <li><strong>Combat Ready:</strong> Disconnected units retain full attack strength and can still participate in combat or launch attacks on adjacent/in-range enemies.</li>
+            <li style={{ marginBottom: '4px' }}><strong>Operational Paralysis:</strong> Disconnected units are completely disabled and cannot move, attack, or be selected.</li>
+            <li><strong>Zero Combat Rating:</strong> Disconnected units have both their Offense and Defense reduced to <strong>0</strong>, leaving them extremely vulnerable to destruction.</li>
           </ul>
         </div>
       )
