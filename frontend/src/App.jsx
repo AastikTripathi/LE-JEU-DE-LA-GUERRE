@@ -2,23 +2,36 @@
 
 // src/App.jsx
 import React, { useState, useEffect, useRef } from 'react';
-import { COLS, ROWS, GET_TERRAIN } from './constants';
+import { COLS, ROWS, TERRAIN_MAP } from './constants';
 import { INITIAL_UNITS } from './initialUnits';
 import Lobby from './components/Lobby';
 import RulesBook from './components/RulesBook';
 
 // Combat Profiles for Tactical Telemetry
 const UNIT_PROFILES = {
-  artillery: { attack: 40, defense: 20, label: "Artillery", tip: "Heavy assault multiplier." },
-  cavalry: { attack: 25, defense: 25, label: "Cavalry", tip: "High mobility flanker." },
-  infantry: { attack: 20, defense: 40, label: "Infantry", tip: "Defensive anchor on active LoC." },
-  relay: { attack: 5, defense: 15, label: "Relay", tip: "Maintains network links." },
+  artillery: { attack: 5, defense: 8, label: "Artillery", tip: "Range 3 support unit." },
+  cavalry: { attack: 5, defense: 5, label: "Cavalry", tip: "Speed 2 unit. Charge rating: 7." },
+  infantry: { attack: 4, defense: 6, label: "Infantry", tip: "Robust line unit." },
+  relay: { attack: 0, defense: 1, label: "Relay", tip: "Maintains connection lines." },
   arsenal: { attack: 0, defense: 500, label: "Arsenal", tip: "Primary command objective." }
 };
 
 export default function App() {
   // Game Mode Configuration State
   const [gameMode, setGameMode] = useState('single');
+  const [playerSide, setPlayerSide] = useState('North');
+  const [layoutType, setLayoutType] = useState('standard');
+  const [activeArsenals, setActiveArsenals] = useState(['7,3', '14,1', '2,19', '22,19']);
+  const [activeForts, setActiveForts] = useState(['7,1', '12,8', '20,7', '2,12', '14,11', '22,14']);
+
+  const getTerrain = (x, y) => {
+    const key = `${x},${y}`;
+    if (TERRAIN_MAP.mountains.includes(key)) return { type: 'mountain', label: '▲', color: '#b9b7a4', border: '1px solid #002fa7' };
+    if (TERRAIN_MAP.passes.includes(key)) return { type: 'pass', label: '⚬', color: '#e5e3c9', border: '2px dashed #002fa7' };
+    if (activeForts.includes(key)) return { type: 'fort', label: '⛊', color: '#d4af37', border: '1px solid #002fa7' };
+    if (activeArsenals.includes(key)) return { type: 'arsenal', label: '★', color: '#fffec2', border: '2px solid #002fa7' };
+    return { type: 'plain', label: '', color: '#ffffff', border: '1px solid #cbd5e1' };
+  };
 
   // Lobby / Authentication States
   const [inLobby, setInLobby] = useState(true);
@@ -249,24 +262,24 @@ export default function App() {
 
       if (closestAttacker) {
         const startCell = gridRef.current.querySelector(`[data-coord="${closestAttacker.x},${closestAttacker.y}"]`);
-        const endCell   = gridRef.current.querySelector(`[data-coord="${deadUnit.x},${deadUnit.y}"]`);
+        const endCell = gridRef.current.querySelector(`[data-coord="${deadUnit.x},${deadUnit.y}"]`);
 
         if (startCell && endCell) {
-          const gridRect  = gridRef.current.getBoundingClientRect();
+          const gridRect = gridRef.current.getBoundingClientRect();
           const startRect = startCell.getBoundingClientRect();
-          const endRect   = endCell.getBoundingClientRect();
+          const endRect = endCell.getBoundingClientRect();
 
-          const x1 = startRect.left + startRect.width  / 2 - gridRect.left;
-          const y1 = startRect.top  + startRect.height / 2 - gridRect.top;
-          const x2 = endRect.left   + endRect.width    / 2 - gridRect.left;
-          const y2 = endRect.top    + endRect.height   / 2 - gridRect.top;
+          const x1 = startRect.left + startRect.width / 2 - gridRect.left;
+          const y1 = startRect.top + startRect.height / 2 - gridRect.top;
+          const x2 = endRect.left + endRect.width / 2 - gridRect.left;
+          const y2 = endRect.top + endRect.height / 2 - gridRect.top;
 
           const unitType = closestAttacker.type.toLowerCase();
           // Faster for cavalry, medium for infantry, slow arc for artillery
           const dur = unitType === 'cavalry' ? '0.25s' : unitType === 'artillery' ? '0.6s' : '0.35s';
           const color = unitType === 'artillery' ? '#f59e0b'   // amber shell
-                      : unitType === 'cavalry'   ? '#06b6d4'   // cyan streak
-                      : '#ef4444';                              // red infantry round
+            : unitType === 'cavalry' ? '#06b6d4'   // cyan streak
+              : '#ef4444';                              // red infantry round
           const size = unitType === 'artillery' ? 10 : 7;
 
           const traceId = Math.random().toString(36).substring(2, 9);
@@ -318,7 +331,7 @@ export default function App() {
     setIsConnecting(true);
     setErrorMessage("Establishing connection... Note: Render servers may take 30-40 seconds to spin up from cold sleep.");
 
-    const secureWsUrl = `${protocol}://${backendHost}/ws/${encodeURIComponent(finalRoom)}?name=${encodeURIComponent(playerName.trim())}&password=${encodeURIComponent(finalPassword)}&vs_ai=${gameMode === 'single'}&ai_vs_ai=${gameMode === 'ai_vs_ai'}`;
+    const secureWsUrl = `${protocol}://${backendHost}/ws/${encodeURIComponent(finalRoom)}?name=${encodeURIComponent(playerName.trim())}&password=${encodeURIComponent(finalPassword)}&vs_ai=${gameMode === 'single'}&ai_vs_ai=${gameMode === 'ai_vs_ai'}&player_side=${playerSide}&layout_type=${layoutType}`;
     const ws = new WebSocket(secureWsUrl);
 
     ws.onopen = () => {
@@ -355,6 +368,18 @@ export default function App() {
       } else {
         setUnits(data.units || []);
 
+        if (data.arsenals) {
+          const n_ars = data.arsenals.North.map(([x,y]) => `${x},${y}`);
+          const s_ars = data.arsenals.South.map(([x,y]) => `${x},${y}`);
+          setActiveArsenals([...n_ars, ...s_ars]);
+        }
+        if (data.fortresses) {
+          const server_forts = data.fortresses.map(([x,y]) => `${x},${y}`);
+          const server_arsenals = [...(data.arsenals?.North || []), ...(data.arsenals?.South || [])].map(([x,y]) => `${x},${y}`);
+          const pure_forts = server_forts.filter(f => !server_arsenals.includes(f));
+          setActiveForts(pure_forts);
+        }
+
         setTurn(data.turn);
         setMovesLeft(data.movesLeft ?? 5);
         setAttackExecuted(data.attackExecuted ?? false);
@@ -367,9 +392,9 @@ export default function App() {
         if (data.players) setPlayers(data.players);
         if (data.winner !== undefined) setWinner(data.winner);
         if (data.lastCombat && data.lastCombat.result !== "DESTROY") {
-  setRepelFlash({ x: data.lastCombat.targetX, y: data.lastCombat.targetY, result: data.lastCombat.result });
-  setTimeout(() => setRepelFlash(null), 600);
-}
+          setRepelFlash({ x: data.lastCombat.targetX, y: data.lastCombat.targetY, result: data.lastCombat.result });
+          setTimeout(() => setRepelFlash(null), 600);
+        }
       }
     };
 
@@ -569,7 +594,11 @@ export default function App() {
   };
 
   const checkLineOfSight = (fromX, fromY, toX, toY, maxRange) => {
-    const distance = Math.max(Math.abs(toX - fromX), Math.abs(toY - fromY));
+    const dxDiff = Math.abs(toX - fromX);
+    const dyDiff = Math.abs(toY - fromY);
+    if (dxDiff !== 0 && dyDiff !== 0 && dxDiff !== dyDiff) return false;
+
+    const distance = Math.max(dxDiff, dyDiff);
     if (distance > maxRange || distance === 0) return false;
 
     let x0 = fromX;
@@ -587,7 +616,7 @@ export default function App() {
     let cy = y0;
     while (true) {
       if ((cx !== x0 || cy !== y0) && (cx !== x1 || cy !== y1)) {
-        if (GET_TERRAIN(cx, cy).type === 'mountain') {
+        if (getTerrain(cx, cy).type === 'mountain') {
           return false;
         }
       }
@@ -620,7 +649,7 @@ export default function App() {
     const visited = new Set([`${startX},${startY}`]);
     const reachable = [];
 
-    const isMountain = (cx, cy) => GET_TERRAIN(cx, cy).type === 'mountain';
+    const isMountain = (cx, cy) => getTerrain(cx, cy).type === 'mountain';
     const isOccupied = (cx, cy) => units.some(u => u.x === cx && u.y === cy);
 
     while (queue.length > 0) {
@@ -661,7 +690,7 @@ export default function App() {
     for (let x = 0; x < COLS; x++) {
       cells.push({
         x, y,
-        terrain: GET_TERRAIN(x, y),
+        terrain: getTerrain(x, y),
         occupyingUnit: unitPositionsMap[`${x},${y}`],
         isNorthLoc: isCellInLoc(x, y, 'North'),
         isSouthLoc: isCellInLoc(x, y, 'South'),
@@ -681,7 +710,7 @@ export default function App() {
     if (Math.abs(dx) > 1 || Math.abs(dy) > 1 || (dx === 0 && dy === 0)) return null;
 
     for (let i = 1; i < sorted.length; i++) {
-      if ((sorted[i].x - sorted[i-1].x) !== dx || (sorted[i].y - sorted[i-1].y) !== dy) {
+      if ((sorted[i].x - sorted[i - 1].x) !== dx || (sorted[i].y - sorted[i - 1].y) !== dy) {
         return null;
       }
     }
@@ -776,6 +805,10 @@ export default function App() {
         handleConnectToRoom={handleConnectToRoom}
         debordPortrait={debordPortrait}
         isConnecting={isConnecting}
+        playerSide={playerSide}
+        setPlayerSide={setPlayerSide}
+        layoutType={layoutType}
+        setLayoutType={setLayoutType}
       />
     );
   }
@@ -787,11 +820,11 @@ export default function App() {
   const opponentSide = activeMySide === 'North' ? 'South' : 'North';
 
   const myName = isAiVsAi ? "🤖 AI_NORTH" : (players[activeMySide] ?? playerName);
-  const opponentName = isAiVsAi ? "🤖 AI_SOUTH" : (players[opponentSide] ?? (isSinglePlayer ? '🤖 CPU_TACTICIAN' : 'Awaiting Commander...'));
+  const opponentName = isAiVsAi ? (activeMySide === 'North' ? '🤖 AI_SOUTH' : '🤖 AI_NORTH') : (players[opponentSide] ?? (isSinglePlayer ? '🤖 CPU_TACTICIAN' : 'Awaiting Commander...'));
 
   // WIN SCREEN OVERLAY
   if (winner) {
-    const winnerName = players[winner] ?? (winner === 'South' && isSinglePlayer ? '🤖 CPU_TACTICIAN' : winner);
+    const winnerName = players[winner] ?? (winner === opponentSide && isSinglePlayer ? '🤖 CPU_TACTICIAN' : winner);
     const isMyWin = winner === activeMySide;
     const winColor = winner === 'North' ? '#002fa7' : '#991b1b';
 
@@ -884,7 +917,7 @@ export default function App() {
       ) : (
         !isMyTurn && <div style={styles.waitingBanner}>{isSinglePlayer ? "🤖 AI CALCULATING ASSAULT VECTORS..." : `⏳ AWAITING OPPONENT...`}</div>
       )}
-      {errorMessage && <div style={{...styles.errorAlert, backgroundColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#d1fae5' : '#fee2e2', borderColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#10b981' : '#fca5a5', color: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#065f46' : '#991b1b'}}>📡 SYSTEM LOG: {errorMessage}</div>}
+      {errorMessage && <div style={{ ...styles.errorAlert, backgroundColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#d1fae5' : '#fee2e2', borderColor: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#10b981' : '#fca5a5', color: errorMessage.includes('Success') || errorMessage.includes('eliminated') || errorMessage.includes('repelled') ? '#065f46' : '#991b1b' }}>📡 SYSTEM LOG: {errorMessage}</div>}
 
       {/* TWO-COLUMN SIDEBAR INTERFACE WRAPPER */}
       <div style={styles.workspaceLayout}>
@@ -939,10 +972,10 @@ export default function App() {
                   <div>DIVISIONS: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{multiSelectedIds.length}</span></div>
                   <div>GROUP ATK: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{totalAttackPower}</span></div>
                   <div>GROUP DEF: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{totalDefensePower}</span></div>
-                  
+
                   {multiSelectedIds.length > 1 && (
-                    <div style={{ 
-                      fontWeight: 'bold', 
+                    <div style={{
+                      fontWeight: 'bold',
                       marginTop: '2px',
                       color: stackOrientation ? '#10b981' : '#002fa7'
                     }}>
@@ -1100,12 +1133,12 @@ export default function App() {
 
                     {/* Skull on graveyard tile (behind live unit if reoccupied) */}
                     {hasResidue && (
-                      <span 
-                        className="skull-marker" 
-                        style={{ 
-                          filter: residue.side === 'North' 
-                            ? 'drop-shadow(0 0 3px #002fa7) sepia(100%) hue-rotate(190deg) saturate(300%)' 
-                            : 'drop-shadow(0 0 3px #991b1b) sepia(100%) hue-rotate(330deg) saturate(300%)' 
+                      <span
+                        className="skull-marker"
+                        style={{
+                          filter: residue.side === 'North'
+                            ? 'drop-shadow(0 0 3px #002fa7) sepia(100%) hue-rotate(190deg) saturate(300%)'
+                            : 'drop-shadow(0 0 3px #991b1b) sepia(100%) hue-rotate(330deg) saturate(300%)'
                         }}
                       >
                         💀
@@ -1138,7 +1171,7 @@ export default function App() {
       </div>
       {/* RULES BOOK MODAL OVERLAY */}
       {showRules && (
-        <div 
+        <div
           onClick={() => setShowRules(false)}
           style={{
             position: 'fixed',
@@ -1152,7 +1185,7 @@ export default function App() {
             padding: '20px'
           }}
         >
-          <div 
+          <div
             onClick={(e) => e.stopPropagation()}
             style={{
               backgroundColor: '#ffffff',
@@ -1171,7 +1204,7 @@ export default function App() {
               textAlign: 'left'
             }}
           >
-            <button 
+            <button
               onClick={() => setShowRules(false)}
               style={{
                 position: 'absolute',
