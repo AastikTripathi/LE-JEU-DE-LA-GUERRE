@@ -929,6 +929,12 @@ class WarGameAI:
             act_uid = action.get("unitId")
 
             if act_uid and action["action_type"] == "move":
+                # Immediate oscillation check: moving back to previous position is heavily penalized
+                history = self.position_history.get(act_uid, [])
+                if len(history) >= 2:
+                    if (action["x"], action["y"]) == history[-2]:
+                        mod -= 180000.0  # Devastating penalty for immediate back-and-forth oscillation
+
                 has_stuck_unit = any(self._detect_behavioral_anomaly(u["id"]) is not None for u in ai_units)
                 if has_stuck_unit:
                     acting_anomaly = self._detect_behavioral_anomaly(act_uid)
@@ -1155,10 +1161,10 @@ class WarGameAI:
                                     conn_unit = next((u for u in units if u["id"] == conn_uid), None)
                                     if conn_unit:
                                         if "relay" in conn_unit.get("type", "").lower():
-                                            mod += 4000.0  # Huge bonus to reconnect a friendly relay playmaker!
+                                            mod += 40000.0  # Huge bonus to reconnect a friendly relay playmaker!
                                         else:
-                                            mod += 2000.0  # Big bonus to reconnect combat units
-                                mod -= len(newly_disconnected) * 2500.0
+                                            mod += 30000.0  # Big bonus to reconnect combat units
+                                mod -= len(newly_disconnected) * 35000.0  # Massive penalty to keep supply lines stable!
 
                                 # Relay supply rule constraints
                                 was_connected = acting_unit["id"] in before_connected
