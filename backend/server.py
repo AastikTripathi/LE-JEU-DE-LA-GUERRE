@@ -172,6 +172,7 @@ async def broadcast_room_state(room_id: str):
         "turn": st["turn"],
         "movesLeft": st["moves_left"],
         "attackExecuted": st["attack_executed_this_turn"],
+        "movedUnitsThisTurn": st["moved_units_this_turn"],
         "linesOfCommunication": {"North": n_loc, "South": s_loc},
         "connectedUnitIds": connected,
         "canUndo": len(room["history"]) > 0,
