@@ -1,8 +1,6 @@
-# server.py
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import copy
+import copy, random, uvicorn
 from engine import GameEngine
 import asyncio  # Needed for step-by-step delay pacing
 from ai import WarGameAI
@@ -79,6 +77,210 @@ def get_initial_state():
     }
 
 
+def generate_random_layout():
+    cols = 25
+    rows = 20
+
+    mountains = {
+        (9, 2), (10, 2), (11, 2), (12, 2),
+        (9, 3), (9, 4),
+        (9, 6), (9, 7), (9, 8),
+        (10, 13), (11, 13), (12, 13), (13, 13), (14, 13), (15, 13),
+        (15, 15), (15, 16), (15, 17)
+    }
+
+    def is_valid(x, y, occupied):
+        if (x, y) in mountains:
+            return False
+        if (x, y) in occupied:
+            return False
+        return 0 <= x < cols and 0 <= y < rows
+
+    occupied = set()
+
+    # 1. Randomize Arsenals (behind or beside starting units)
+    north_arsenals = set()
+    while len(north_arsenals) < 2:
+        ax = random.randint(1, cols - 2)
+        ay = random.randint(0, 2)
+        if is_valid(ax, ay, occupied):
+            if not north_arsenals or all(abs(ax - ox) >= 3 for ox, oy in north_arsenals):
+                north_arsenals.add((ax, ay))
+                occupied.add((ax, ay))
+
+    south_arsenals = set()
+    while len(south_arsenals) < 2:
+        ax = random.randint(1, cols - 2)
+        ay = random.randint(17, 19)
+        if is_valid(ax, ay, occupied):
+            if not south_arsenals or all(abs(ax - ox) >= 3 for ox, oy in south_arsenals):
+                south_arsenals.add((ax, ay))
+                occupied.add((ax, ay))
+
+    # 2. Place Relays adjacent to Arsenals (ensuring supply connection)
+    directions = [(0,1), (0,-1), (1,0), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)]
+    north_relays = []
+    for ax, ay in list(north_arsenals):
+        placed = False
+        dirs = list(directions)
+        random.shuffle(dirs)
+        for dx, dy in dirs:
+            rx, ry = ax + dx, ay + dy
+            if is_valid(rx, ry, occupied) and ry <= 3:
+                north_relays.append((rx, ry))
+                occupied.add((rx, ry))
+                placed = True
+                break
+        if not placed:
+            for ry in range(4):
+                for rx in range(cols):
+                    if is_valid(rx, ry, occupied):
+                        north_relays.append((rx, ry))
+                        occupied.add((rx, ry))
+                        break
+                if len(north_relays) == len(occupied) - 2:
+                    break
+
+    south_relays = []
+    for ax, ay in list(south_arsenals):
+        placed = False
+        dirs = list(directions)
+        random.shuffle(dirs)
+        for dx, dy in dirs:
+            rx, ry = ax + dx, ay + dy
+            if is_valid(rx, ry, occupied) and ry >= 16:
+                south_relays.append((rx, ry))
+                occupied.add((rx, ry))
+                placed = True
+                break
+        if not placed:
+            for ry in range(16, 20):
+                for rx in range(cols):
+                    if is_valid(rx, ry, occupied):
+                        south_relays.append((rx, ry))
+                        occupied.add((rx, ry))
+                        break
+                if len(south_relays) == len(occupied) - 4:
+                    break
+
+    # Calculate starting LoC map
+    def get_starting_loc(side_arsenals, side_relays):
+        loc = set(side_arsenals)
+        for rx, ry in side_relays:
+            queue = [(rx, ry, 0)]
+            visited = {(rx, ry)}
+            while queue:
+                cx, cy, dist = queue.pop(0)
+                loc.add((cx, cy))
+                if dist < 4:
+                    for dx, dy in directions:
+                        nx, ny = cx + dx, cy + dy
+                        if 0 <= nx < cols and 0 <= ny < rows and (nx, ny) not in mountains and (nx, ny) not in visited:
+                            visited.add((nx, ny))
+                            queue.append((nx, ny, dist + 1))
+        return loc
+
+    north_loc = get_starting_loc(north_arsenals, north_relays)
+    south_loc = get_starting_loc(south_arsenals, south_relays)
+
+    # 3. Place Combat Units (70% must start inside starting LoC)
+    def place_side_units(side, starting_loc, start_y, end_y, relays):
+        combat_types = (["Artillery"] * 2) + (["Cavalry"] * 4) + (["Infantry"] * 9)
+        random.shuffle(combat_types)
+
+        all_valid_cells = []
+        for y in range(start_y, end_y + 1):
+            for x in range(cols):
+                if is_valid(x, y, occupied):
+                    all_valid_cells.append((x, y))
+
+        loc_cells = [c for c in all_valid_cells if c in starting_loc]
+        
+        placed_units = []
+        # Place 11 units (out of 15, i.e. > 70%) on LoC cells
+        num_loc_to_place = min(11, len(loc_cells))
+        loc_placements = random.sample(loc_cells, num_loc_to_place)
+        for c in loc_placements:
+            occupied.add(c)
+            placed_units.append(c)
+
+        # Place remaining combat units anywhere valid in start zone
+        remaining_count = 15 - num_loc_to_place
+        remaining_valid = [c for c in all_valid_cells if c not in occupied]
+        if len(remaining_valid) >= remaining_count:
+            other_placements = random.sample(remaining_valid, remaining_count)
+            for c in other_placements:
+                occupied.add(c)
+                placed_units.append(c)
+        else:
+            for c in remaining_valid:
+                occupied.add(c)
+                placed_units.append(c)
+
+        units_list = []
+        # Add Relays
+        for idx, r in enumerate(relays):
+            prefix = "n" if side == "North" else "s"
+            units_list.append({
+                "id": f"{prefix}-rel-{idx+1}",
+                "side": side,
+                "type": "Relay",
+                "symbol": "R",
+                "x": r[0],
+                "y": r[1]
+            })
+        # Add Combat Units
+        inf_cnt, cav_cnt, art_cnt = 1, 1, 1
+        for idx, c in enumerate(placed_units):
+            utype = combat_types[idx]
+            prefix = "n" if side == "North" else "s"
+            if utype == "Infantry":
+                uid = f"{prefix}-inf-{inf_cnt}"
+                inf_cnt += 1
+                sym = "I"
+            elif utype == "Cavalry":
+                uid = f"{prefix}-cav-{cav_cnt}"
+                cav_cnt += 1
+                sym = "C"
+            else:
+                uid = f"{prefix}-art-{art_cnt}"
+                art_cnt += 1
+                sym = "A"
+            units_list.append({
+                "id": uid,
+                "side": side,
+                "type": utype,
+                "symbol": sym,
+                "x": c[0],
+                "y": c[1]
+            })
+        return units_list
+
+    north_units_list = place_side_units("North", north_loc, 0, 5, north_relays)
+    south_units_list = place_side_units("South", south_loc, 14, 19, south_relays)
+
+    all_units = north_units_list + south_units_list
+
+    # Combined forts: standard forts + all arsenals
+    fortresses = {
+        (7, 1), (12, 8), (20, 7),
+        (2, 12), (14, 11), (22, 14)
+    }
+    for a in north_arsenals:
+        fortresses.add(a)
+    for a in south_arsenals:
+        fortresses.add(a)
+
+    return {
+        "units": all_units,
+        "arsenals": {
+            "North": list(north_arsenals),
+            "South": list(south_arsenals)
+        },
+        "fortresses": list(fortresses)
+    }
+
+
 def check_win_condition(units: list) -> str | None:
     """
     Returns 'North', 'South', or None.
@@ -135,7 +337,7 @@ def check_win_condition(units: list) -> str | None:
 #         }
 
 
-def initialize_room(room_id: str, vs_ai: bool = False, ai_vs_ai: bool = False):
+def initialize_room(room_id: str, vs_ai: bool = False, ai_vs_ai: bool = False, player_side: str = "North", layout_type: str = "standard"):
     if room_id not in rooms:
         rooms[room_id] = {
             "state": get_initial_state(),
@@ -144,14 +346,38 @@ def initialize_room(room_id: str, vs_ai: bool = False, ai_vs_ai: bool = False):
             "password": None,
             "vs_ai": vs_ai,
             "ai_vs_ai": ai_vs_ai, # Track if both sides are automated
-            "sim_running": False  # Flag to prevent spawning duplicate task threads
+            "sim_running": False,  # Flag to prevent spawning duplicate task threads
+            "player_side": player_side,
+            "ai_side": "South" if player_side == "North" else "North",
+            "layout_type": layout_type,
+            "arsenals": {
+                "North": {(7, 3), (14, 1)},
+                "South": {(2, 19), (22, 19)}
+            },
+            "fortresses": {
+                (7, 1), (12, 8), (20, 7),
+                (2, 12), (14, 11), (22, 14),
+                (7, 3), (14, 1),
+                (2, 19), (22, 19)
+            }
         }
+        if layout_type == "random":
+            layout = generate_random_layout()
+            rooms[room_id]["state"]["units"] = layout["units"]
+            rooms[room_id]["arsenals"] = {
+                "North": set(tuple(a) for a in layout["arsenals"]["North"]),
+                "South": set(tuple(a) for a in layout["arsenals"]["South"])
+            }
+            rooms[room_id]["fortresses"] = set(tuple(f) for f in layout["fortresses"])
 
 
 async def broadcast_room_state(room_id: str):
     room = rooms.get(room_id)
     if not room:
         return
+
+    engine.arsenals = room.get("arsenals", engine.arsenals)
+    engine.fortresses = room.get("fortresses", engine.fortresses)
 
     st = room["state"]
     n_loc = [[x, y] for x, y in engine.compute_lines_of_communication(st["units"], "North")]
@@ -179,6 +405,11 @@ async def broadcast_room_state(room_id: str):
         "players": players,
         "winner": winner,
         "lastCombat": st.get("last_combat"),
+        "arsenals": {
+            "North": list(room.get("arsenals", {}).get("North", [])),
+            "South": list(room.get("arsenals", {}).get("South", []))
+        },
+        "fortresses": list(room.get("fortresses", []))
     }
 
     for conn in room["connections"]:
@@ -276,6 +507,60 @@ async def run_ai_simulation(room_id: str):
             room["sim_running"] = False
 
 
+async def run_ai_turn_if_needed(room_id: str):
+    room = rooms.get(room_id)
+    if not room or not room.get("vs_ai", False):
+        return
+    st = room["state"]
+    ai_side = room.get("ai_side", "South")
+    player_side = room.get("player_side", "North")
+
+    if st["turn"] == ai_side and not check_win_condition(st["units"]):
+        ai_agent = WarGameAI(engine, side=ai_side)
+
+        while st["turn"] == ai_side and st["moves_left"] > 0:
+            await asyncio.sleep(0.8)
+            room = rooms.get(room_id)
+            if not room or not room["connections"]:
+                break
+
+            best_act = ai_agent.select_best_action(st)
+
+            if best_act["action_type"] == "end_turn":
+                break
+
+            if best_act["action_type"] == "move":
+                for u in st["units"]:
+                    if u["id"] == best_act["unitId"]:
+                        u["x"], u["y"] = best_act["x"], best_act["y"]
+                st["moves_left"] -= 1
+                st["moved_units_this_turn"].append(best_act["unitId"])
+
+            elif best_act["action_type"] == "attack":
+                tx, ty = best_act["x"], best_act["y"]
+                mover = next((u for u in st["units"] if u["id"] == best_act["unitId"]), None)
+                combat = engine.calculate_combat(st["units"], ai_side, tx, ty)
+                if combat.get("valid"):
+                    if combat["result"] == "DESTROY":
+                        st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
+                    st["last_combat"] = {
+                        "attackerX": mover["x"] if mover else tx,
+                        "attackerY": mover["y"] if mover else ty,
+                        "targetX": tx, "targetY": ty, "result": combat["result"]
+                    }
+                st["attack_executed_this_turn"] = True
+
+            await broadcast_room_state(room_id)
+
+        # Return control back to player
+        st["turn"] = player_side
+        st["moves_left"] = 5
+        st["moved_units_this_turn"] = []
+        st["attack_executed_this_turn"] = False
+        st["last_combat"] = None
+        await broadcast_room_state(room_id)
+
+
 # @app.websocket("/ws/{room_id}")
 # async def websocket_endpoint(websocket: WebSocket, room_id: str):
 #     name = websocket.query_params.get("name", "Unknown")
@@ -300,9 +585,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     password = websocket.query_params.get("password", "")
     vs_ai = websocket.query_params.get("vs_ai", "false").lower() == "true"
     ai_vs_ai = websocket.query_params.get("ai_vs_ai", "false").lower() == "true"
+    player_side = websocket.query_params.get("player_side", "North")
+    layout_type = websocket.query_params.get("layout_type", "standard")
 
     await websocket.accept()
-    initialize_room(room_id, vs_ai=vs_ai, ai_vs_ai=ai_vs_ai)
+    initialize_room(room_id, vs_ai=vs_ai, ai_vs_ai=ai_vs_ai, player_side=player_side, layout_type=layout_type)
 
     room = rooms[room_id]
 
@@ -310,17 +597,13 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     if room.get("vs_ai", False) or room.get("ai_vs_ai", False):
         room["connections"] = []
 
-
-
     # --- Password check ---
-    # The first player to connect sets the room password; subsequent players must match it.
     if room["password"] is None:
         room["password"] = password
     elif room["password"] != password:
         await websocket.send_json({"type": "error", "message": "Authentication failed: incorrect password."})
         await websocket.close()
         return
-
 
     existing_conn = next((c for c in room["connections"] if c["name"] == name), None)
 
@@ -333,27 +616,24 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         except Exception:
             pass
     else:
-        # Standard side assignment for a brand new player joining
-        taken_sides = {conn["side"] for conn in room["connections"] if conn["side"] is not None}
-
-        if "North" not in taken_sides:
-            assigned_side = "North"
-        elif "South" not in taken_sides:
-            assigned_side = "South"
+        if room.get("vs_ai", False):
+            assigned_side = room.get("player_side", "North")
         else:
-            # Room is full — reject the 3rd+ connection
-            await websocket.send_json({
-                "type": "error",
-                "message": "Room is full. This battle already has two commanders."
-            })
-            await websocket.close()
-            return
+            # Standard side assignment for a brand new player joining
+            taken_sides = {conn["side"] for conn in room["connections"] if conn["side"] is not None}
 
-    # conn_entry = {"ws": websocket, "name": name, "side": assigned_side}
-    # room["connections"].append(conn_entry)
-    #
-    # # Broadcast updated state so the new player immediately learns their side
-    # await broadcast_room_state(room_id)
+            if "North" not in taken_sides:
+                assigned_side = "North"
+            elif "South" not in taken_sides:
+                assigned_side = "South"
+            else:
+                # Room is full — reject the 3rd+ connection
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Room is full. This battle already has two commanders."
+                })
+                await websocket.close()
+                return
 
     conn_entry = {"ws": websocket, "name": name, "side": assigned_side if not room.get("ai_vs_ai") else "Observer"}
     room["connections"].append(conn_entry)
@@ -365,8 +645,15 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         room["sim_running"] = True
         asyncio.create_task(run_ai_simulation(room_id))
 
+    if room.get("vs_ai", False):
+        asyncio.create_task(run_ai_turn_if_needed(room_id))
+
     try:
         while True:
+            # Ensure engine knows the current room's layout
+            engine.arsenals = room.get("arsenals", engine.arsenals)
+            engine.fortresses = room.get("fortresses", engine.fortresses)
+
             data = await websocket.receive_json()
             st = room["state"]
             action = data.get("action")
@@ -451,8 +738,36 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
             elif action == "restart":
                 room["history"].clear()
-                room["state"] = get_initial_state()
+                if room.get("layout_type") == "random":
+                    layout = generate_random_layout()
+                    room["state"] = {
+                        "units": layout["units"],
+                        "turn": "North",
+                        "moves_left": 5,
+                        "moved_units_this_turn": [],
+                        "attack_executed_this_turn": False,
+                        "last_combat": None
+                    }
+                    room["arsenals"] = {
+                        "North": set(tuple(a) for a in layout["arsenals"]["North"]),
+                        "South": set(tuple(a) for a in layout["arsenals"]["South"])
+                    }
+                    room["fortresses"] = set(tuple(f) for f in layout["fortresses"])
+                else:
+                    room["state"] = get_initial_state()
+                    room["arsenals"] = {
+                        "North": {(7, 3), (14, 1)},
+                        "South": {(2, 19), (22, 19)}
+                    }
+                    room["fortresses"] = {
+                        (7, 1), (12, 8), (20, 7),
+                        (2, 12), (14, 11), (22, 14),
+                        (7, 3), (14, 1),
+                        (2, 19), (22, 19)
+                    }
                 await broadcast_room_state(room_id)
+                if room.get("vs_ai", False):
+                    asyncio.create_task(run_ai_turn_if_needed(room_id))
 
             # elif action == "end_turn":
             #     room["history"].clear()  # Wipe undo stack when turn officially locks down
@@ -474,62 +789,10 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
                 # Broadcast the shift to South's turn immediately
                 await broadcast_room_state(room_id)
-
+                
                 # --- INTERCEPT FOR AI MATCH PLAY ---
-                # Trigger automation if the next turn belongs to South and the room name flags an AI setup
-                # if st["turn"] == "South" and "ai" in room_id.lower():
-                #     ai_agent = WarGameAI(engine, side="South")
-                if st["turn"] == "South" and room.get("vs_ai", False):
-                    ai_agent = WarGameAI(engine, side="South")
-
-                    # AI processes tactical actions step by step until its strategic points deplete
-                    while st["turn"] == "South" and st["moves_left"] > 0:
-                        # 800ms delay gives human players visual cues of enemy pieces sliding
-                        await asyncio.sleep(0.8)
-
-                        best_act = ai_agent.select_best_action(st)
-
-                        if best_act["action_type"] == "end_turn":
-                            break
-
-                        if best_act["action_type"] == "move":
-                            for u in st["units"]:
-                                if u["id"] == best_act["unitId"]:
-                                    u["x"], u["y"] = best_act["x"], best_act["y"]
-                            st["moves_left"] -= 1
-                            st["moved_units_this_turn"].append(best_act["unitId"])
-
-                        # elif best_act["action_type"] == "attack":
-                        #     combat = engine.calculate_combat(st["units"], "South", best_act["x"], best_act["y"])
-                        #     if combat.get("valid") and combat["result"] == "DESTROY":
-                        #         tx, ty = best_act["x"], best_act["y"]
-                        #         st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
-                        #     st["attack_executed_this_turn"] = True
-
-                        elif best_act["action_type"] == "attack":
-                            tx, ty = best_act["x"], best_act["y"]
-                            mover = next((u for u in st["units"] if u["id"] == best_act["unitId"]), None)
-                            combat = engine.calculate_combat(st["units"], "South", tx, ty)
-                            if combat.get("valid"):
-                                if combat["result"] == "DESTROY":
-                                    st["units"] = [u for u in st["units"] if not (u["x"] == tx and u["y"] == ty)]
-                                st["last_combat"] = {
-                                    "attackerX": mover["x"] if mover else tx,
-                                    "attackerY": mover["y"] if mover else ty,
-                                    "targetX": tx, "targetY": ty, "result": combat["result"]
-                                }
-                            st["attack_executed_this_turn"] = True
-
-                        # Sync intermediate update out to the active websocket connection
-                        await broadcast_room_state(room_id)
-
-                    # Return control seamlessly back to the human player (North)
-                    st["turn"] = "North"
-                    st["moves_left"] = 5
-                    st["moved_units_this_turn"] = []
-                    st["attack_executed_this_turn"] = False
-                    st["last_combat"] = None
-                    await broadcast_room_state(room_id)
+                if room.get("vs_ai", False):
+                    asyncio.create_task(run_ai_turn_if_needed(room_id))
 
     except WebSocketDisconnect:
         room["connections"].remove(conn_entry)
