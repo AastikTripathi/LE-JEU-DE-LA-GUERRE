@@ -166,7 +166,12 @@ class GameEngine:
 
     def check_line_of_sight(self, from_x: int, from_y: int, to_x: int, to_y: int, max_range: int,
                             units: List[Dict]) -> bool:
-        distance = max(abs(to_x - from_x), abs(to_y - from_y))
+        dx_diff = abs(to_x - from_x)
+        dy_diff = abs(to_y - from_y)
+        if dx_diff != 0 and dy_diff != 0 and dx_diff != dy_diff:
+            return False
+
+        distance = max(dx_diff, dy_diff)
         if distance > max_range or distance == 0:
             return False
 
