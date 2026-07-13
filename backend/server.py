@@ -281,7 +281,7 @@ def generate_random_layout():
     }
 
 
-def check_win_condition(units: list) -> str | None:
+def check_win_condition(units: list, arsenals: dict = None) -> str | None:
     """
     Returns 'North', 'South', or None.
     Win conditions:
@@ -302,8 +302,12 @@ def check_win_condition(units: list) -> str | None:
     south_pos = {(u["x"], u["y"]) for u in south_units}
 
     # Arsenal tile coordinates
-    north_arsenals = {(12, 1), (13, 1)}
-    south_arsenals = {(2, 18), (22, 18)}
+    if not arsenals:
+        north_arsenals = {(7, 3), (14, 1)}
+        south_arsenals = {(2, 19), (22, 19)}
+    else:
+        north_arsenals = set(tuple(a) for a in arsenals.get("North", []))
+        south_arsenals = set(tuple(a) for a in arsenals.get("South", []))
 
     # Full capture: you must occupy ALL enemy arsenal tiles at once
     if north_arsenals.issubset(south_pos):   # South holds both North arsenals
@@ -347,6 +351,8 @@ def initialize_room(room_id: str, vs_ai: bool = False, ai_vs_ai: bool = False, p
             "vs_ai": vs_ai,
             "ai_vs_ai": ai_vs_ai, # Track if both sides are automated
             "sim_running": False,  # Flag to prevent spawning duplicate task threads
+            "turn_counter": 0,
+            "ai_position_history": {},
             "player_side": player_side,
             "ai_side": "South" if player_side == "North" else "North",
             "layout_type": layout_type,
@@ -369,6 +375,26 @@ def initialize_room(room_id: str, vs_ai: bool = False, ai_vs_ai: bool = False, p
                 "South": set(tuple(a) for a in layout["arsenals"]["South"])
             }
             rooms[room_id]["fortresses"] = set(tuple(f) for f in layout["fortresses"])
+        elif layout_type == "skirmish_10x10":
+            rooms[room_id]["cols"] = 10
+            rooms[room_id]["rows"] = 10
+            rooms[room_id]["arsenals"] = {
+                "North": {(4, 0)},
+                "South": {(5, 9)}
+            }
+            rooms[room_id]["fortresses"] = {(4, 0), (5, 9)}
+            rooms[room_id]["state"]["units"] = [
+                # North Forces
+                {"id": "n-art-1", "type": "artillery", "symbol": "A", "side": "North", "x": 4, "y": 0},
+                {"id": "n-rel-1", "type": "relay", "symbol": "R", "side": "North", "x": 4, "y": 1},
+                {"id": "n-inf-1", "type": "infantry", "symbol": "I", "side": "North", "x": 3, "y": 2},
+                {"id": "n-cav-1", "type": "cavalry", "symbol": "C", "side": "North", "x": 5, "y": 2},
+                # South Forces
+                {"id": "s-art-1", "type": "artillery", "symbol": "A", "side": "South", "x": 5, "y": 9},
+                {"id": "s-rel-1", "type": "relay", "symbol": "R", "side": "South", "x": 5, "y": 8},
+                {"id": "s-inf-1", "type": "infantry", "symbol": "I", "side": "South", "x": 6, "y": 7},
+                {"id": "s-cav-1", "type": "cavalry", "symbol": "C", "side": "South", "x": 4, "y": 7}
+            ]
 
 
 async def broadcast_room_state(room_id: str):
@@ -378,6 +404,8 @@ async def broadcast_room_state(room_id: str):
 
     engine.arsenals = room.get("arsenals", engine.arsenals)
     engine.fortresses = room.get("fortresses", engine.fortresses)
+    engine.cols = room.get("cols", 25)
+    engine.rows = room.get("rows", 20)
 
     st = room["state"]
     n_loc = [[x, y] for x, y in engine.compute_lines_of_communication(st["units"], "North")]
@@ -391,7 +419,7 @@ async def broadcast_room_state(room_id: str):
         if conn["side"] in ("North", "South"):
             players[conn["side"]] = conn["name"]
 
-    winner = check_win_condition(st["units"])
+    winner = check_win_condition(st["units"], room.get("arsenals"))
 
     payload = {
         "units": st["units"],
@@ -405,6 +433,8 @@ async def broadcast_room_state(room_id: str):
         "players": players,
         "winner": winner,
         "lastCombat": st.get("last_combat"),
+        "cols": room.get("cols", 25),
+        "rows": room.get("rows", 20),
         "arsenals": {
             "North": list(room.get("arsenals", {}).get("North", [])),
             "South": list(room.get("arsenals", {}).get("South", []))
@@ -440,15 +470,16 @@ async def run_ai_simulation(room_id: str):
 
             st = room["state"]
             current_side = st["turn"]
-            ai_agent = WarGameAI(engine, side=current_side)
+            ai_agent = WarGameAI(engine, side=current_side, position_history=room.get("ai_position_history"), turn_counter=room.get("turn_counter", 0))
 
             # Process actions rapidly
             while st["turn"] == current_side and st["moves_left"] > 0:
                 # Scaled down to 50ms for ultra-rapid visual automation updates
-                if check_win_condition(st["units"]):
+                if check_win_condition(st["units"], room.get("arsenals")):
                     return
 
-                await asyncio.sleep(0.05)
+                delay = 3.0 if room.get("layout_type") == "skirmish_10x10" else 0.05
+                await asyncio.sleep(delay)
 
                 room = rooms.get(room_id)
                 if not room or not room.get("ai_vs_ai", False) or not room["connections"]:
@@ -492,6 +523,7 @@ async def run_ai_simulation(room_id: str):
 
             # Hand over active control matrix directly to opposing instance
             room["history"].clear()
+            room["turn_counter"] = room.get("turn_counter", 0) + 1
             st["turn"] = "South" if current_side == "North" else "North"
             st["moves_left"] = 5
             st["moved_units_this_turn"] = []
@@ -515,11 +547,12 @@ async def run_ai_turn_if_needed(room_id: str):
     ai_side = room.get("ai_side", "South")
     player_side = room.get("player_side", "North")
 
-    if st["turn"] == ai_side and not check_win_condition(st["units"]):
-        ai_agent = WarGameAI(engine, side=ai_side)
+    if st["turn"] == ai_side and not check_win_condition(st["units"], room.get("arsenals")):
+        ai_agent = WarGameAI(engine, side=ai_side, position_history=room.get("ai_position_history"), turn_counter=room.get("turn_counter", 0))
 
         while st["turn"] == ai_side and st["moves_left"] > 0:
-            await asyncio.sleep(0.8)
+            delay = 3.0 if room.get("layout_type") == "skirmish_10x10" else 0.8
+            await asyncio.sleep(delay)
             room = rooms.get(room_id)
             if not room or not room["connections"]:
                 break
@@ -653,6 +686,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             # Ensure engine knows the current room's layout
             engine.arsenals = room.get("arsenals", engine.arsenals)
             engine.fortresses = room.get("fortresses", engine.fortresses)
+            engine.cols = room.get("cols", 25)
+            engine.rows = room.get("rows", 20)
 
             data = await websocket.receive_json()
             st = room["state"]
@@ -669,7 +704,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 continue
 
             # Freeze all actions (except restart) once the game has a winner
-            if action != "restart" and check_win_condition(st["units"]):
+            if action != "restart" and check_win_condition(st["units"], room.get("arsenals")):
                 await websocket.send_json({"type": "error", "message": "The battle is over. Restart to play again."})
                 continue
 
@@ -738,6 +773,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
             elif action == "restart":
                 room["history"].clear()
+                room["turn_counter"] = 0
+                room["ai_position_history"] = {}
                 if room.get("layout_type") == "random":
                     layout = generate_random_layout()
                     room["state"] = {
@@ -753,7 +790,34 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                         "South": set(tuple(a) for a in layout["arsenals"]["South"])
                     }
                     room["fortresses"] = set(tuple(f) for f in layout["fortresses"])
+                elif room.get("layout_type") == "skirmish_10x10":
+                    room["cols"] = 10
+                    room["rows"] = 10
+                    room["arsenals"] = {
+                        "North": {(4, 0)},
+                        "South": {(5, 9)}
+                    }
+                    room["fortresses"] = {(4, 0), (5, 9)}
+                    room["state"] = {
+                        "units": [
+                            {"id": "n-art-1", "type": "artillery", "symbol": "A", "side": "North", "x": 4, "y": 0},
+                            {"id": "n-rel-1", "type": "relay", "symbol": "R", "side": "North", "x": 4, "y": 1},
+                            {"id": "n-inf-1", "type": "infantry", "symbol": "I", "side": "North", "x": 3, "y": 2},
+                            {"id": "n-cav-1", "type": "cavalry", "symbol": "C", "side": "North", "x": 5, "y": 2},
+                            {"id": "s-art-1", "type": "artillery", "symbol": "A", "side": "South", "x": 5, "y": 9},
+                            {"id": "s-rel-1", "type": "relay", "symbol": "R", "side": "South", "x": 5, "y": 8},
+                            {"id": "s-inf-1", "type": "infantry", "symbol": "I", "side": "South", "x": 6, "y": 7},
+                            {"id": "s-cav-1", "type": "cavalry", "symbol": "C", "side": "South", "x": 4, "y": 7}
+                        ],
+                        "turn": "North",
+                        "moves_left": 5,
+                        "moved_units_this_turn": [],
+                        "attack_executed_this_turn": False,
+                        "last_combat": None
+                    }
                 else:
+                    room["cols"] = 25
+                    room["rows"] = 20
                     room["state"] = get_initial_state()
                     room["arsenals"] = {
                         "North": {(7, 3), (14, 1)},
@@ -768,6 +832,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 await broadcast_room_state(room_id)
                 if room.get("vs_ai", False):
                     asyncio.create_task(run_ai_turn_if_needed(room_id))
+                elif room.get("ai_vs_ai", False) and not room.get("sim_running", False):
+                    room["sim_running"] = True
+                    asyncio.create_task(run_ai_simulation(room_id))
 
             # elif action == "end_turn":
             #     room["history"].clear()  # Wipe undo stack when turn officially locks down
@@ -780,6 +847,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
             elif action == "end_turn":
                 room["history"].clear()  # Wipe undo stack when turn officially locks down
+                room["turn_counter"] = room.get("turn_counter", 0) + 1
                 next_side = "South" if st["turn"] == "North" else "North"
                 st["turn"] = next_side
                 st["moves_left"] = 5

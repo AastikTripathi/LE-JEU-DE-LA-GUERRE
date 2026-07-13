@@ -134,6 +134,19 @@ export default function Lobby({
                     >
                       RANDOMIZED
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setLayoutType('skirmish_10x10')}
+                      style={{
+                        flex: 1, border: 'none', padding: '8px', fontSize: '8px',
+                        fontFamily: 'monospace', borderRadius: '3px', cursor: 'pointer',
+                        backgroundColor: layoutType === 'skirmish_10x10' ? '#002fa7' : 'transparent',
+                        color: layoutType === 'skirmish_10x10' ? '#ffffff' : '#002fa7',
+                        fontWeight: 'bold'
+                      }}
+                    >
+                      SKIRMISH (10x10)
+                    </button>
                   </div>
                 </div>
                 {gameMode === 'single' && (

@@ -23,6 +23,8 @@ export default function App() {
   const [layoutType, setLayoutType] = useState('standard');
   const [activeArsenals, setActiveArsenals] = useState(['7,3', '14,1', '2,19', '22,19']);
   const [activeForts, setActiveForts] = useState(['7,1', '12,8', '20,7', '2,12', '14,11', '22,14']);
+  const [boardCols, setBoardCols] = useState(COLS);
+  const [boardRows, setBoardRows] = useState(ROWS);
 
   const getTerrain = (x, y) => {
     const key = `${x},${y}`;
@@ -170,6 +172,18 @@ export default function App() {
   --glow-color: #10b981;
   animation: selectionGlow 1.6s ease-in-out infinite;
   border: 2px dashed #10b981 !important;
+  z-index: 10 !important;
+}
+.cell-selected-enemy {
+  --glow-color: #ef4444;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px dashed #ef4444 !important;
+  z-index: 10 !important;
+}
+.cell-selected-enemy-stack {
+  --glow-color: #ef4444;
+  animation: selectionGlow 1.6s ease-in-out infinite;
+  border: 2px solid #ef4444 !important;
   z-index: 10 !important;
 }
 .cell-reachable {
@@ -367,6 +381,8 @@ export default function App() {
         }
       } else {
         setUnits(data.units || []);
+        if (data.cols !== undefined) setBoardCols(data.cols);
+        if (data.rows !== undefined) setBoardRows(data.rows);
 
         if (data.arsenals) {
           const n_ars = data.arsenals.North.map(([x,y]) => `${x},${y}`);
@@ -408,6 +424,8 @@ export default function App() {
       setPlayers({ North: null, South: null });
       setWinner(null);
       setIsConnecting(false);
+      setBoardCols(COLS);
+      setBoardRows(ROWS);
     };
 
     setSocket(ws);
@@ -468,90 +486,104 @@ export default function App() {
   const isMyTurn = mySide === turn;
 
   const handleCellClick = (x, y) => {
-    if (!isMyTurn) return;
     const clickedUnit = unitPositionsMap[`${x},${y}`];
 
     if (clickedUnit) {
-      if (clickedUnit.side === turn) {
-        if (!connectedUnitIds.includes(clickedUnit.id)) {
-          return;
-        }
+      const isFriendlyClick = clickedUnit.side === activeMySide;
+      const currentSelectionSide = multiSelectedIds.length > 0 ? units.find(u => u.id === multiSelectedIds[0])?.side : null;
+      const oppositeFactionSelected = currentSelectionSide && currentSelectionSide !== clickedUnit.side;
+      
+      let effectiveIds = oppositeFactionSelected ? [] : multiSelectedIds;
+
+      if (isFriendlyClick) {
+        // Friendly unit selection
         if (sKeyHeld) {
-          if (isAdjacentToSelection(clickedUnit, multiSelectedIds, units)) {
+          if (isAdjacentToSelection(clickedUnit, effectiveIds, units)) {
             setIsAttackStack(true);
             if (shiftKeyHeld) {
               const comp = getConnectedComponent(clickedUnit, units);
               setMultiSelectedIds(comp.map(u => u.id));
             } else {
-              setMultiSelectedIds(prev =>
-                prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
-              );
+              setMultiSelectedIds(prev => {
+                const base = oppositeFactionSelected ? [] : prev;
+                return base.includes(clickedUnit.id) ? base.filter(id => id !== clickedUnit.id) : [...base, clickedUnit.id];
+              });
             }
           } else {
             setSelectedUnitId(null);
             setMultiSelectedIds([]);
           }
         } else if (xKeyHeld) {
-          if (isAdjacentToSelection(clickedUnit, multiSelectedIds, units)) {
+          if (isAdjacentToSelection(clickedUnit, effectiveIds, units)) {
             setIsAttackStack(false);
             if (shiftKeyHeld) {
               const comp = getConnectedComponent(clickedUnit, units);
               setMultiSelectedIds(comp.map(u => u.id));
             } else {
-              setMultiSelectedIds(prev =>
-                prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
-              );
+              setMultiSelectedIds(prev => {
+                const base = oppositeFactionSelected ? [] : prev;
+                return base.includes(clickedUnit.id) ? base.filter(id => id !== clickedUnit.id) : [...base, clickedUnit.id];
+              });
             }
           } else {
             setSelectedUnitId(null);
             setMultiSelectedIds([]);
           }
         } else {
+          // Single select friendly
           setIsAttackStack(true);
-          setSelectedUnitId(clickedUnit.id === selectedUnitId ? null : clickedUnit.id);
-          setMultiSelectedIds(clickedUnit.id === selectedUnitId ? [] : [clickedUnit.id]);
+          const nextSelectedId = clickedUnit.id === selectedUnitId ? null : clickedUnit.id;
+          setSelectedUnitId(nextSelectedId);
+          setMultiSelectedIds(nextSelectedId ? [clickedUnit.id] : []);
         }
       } else {
+        // Enemy unit click
         if (zKeyHeld) {
-          if (isAdjacentToSelection(clickedUnit, multiSelectedIds, units)) {
+          // Inspect enemy group
+          if (isAdjacentToSelection(clickedUnit, effectiveIds, units)) {
             setIsAttackStack(false);
-            setSelectedUnitId(null); // Clear friendly selection when selecting enemies
+            setSelectedUnitId(null); // Clear friendly selectedUnitId
             if (shiftKeyHeld) {
               const comp = getConnectedComponent(clickedUnit, units);
               setMultiSelectedIds(comp.map(u => u.id));
             } else {
-              setMultiSelectedIds(prev =>
-                prev.includes(clickedUnit.id) ? prev.filter(id => id !== clickedUnit.id) : [...prev, clickedUnit.id]
-              );
+              setMultiSelectedIds(prev => {
+                const base = oppositeFactionSelected ? [] : prev;
+                return base.includes(clickedUnit.id) ? base.filter(id => id !== clickedUnit.id) : [...base, clickedUnit.id];
+              });
             }
           } else {
             setSelectedUnitId(null);
             setMultiSelectedIds([]);
           }
-        } else if ((selectedUnitId || (multiSelectedIds.length > 0 && isAttackStack)) && socket?.readyState === WebSocket.OPEN) {
-          if (isEnemyInAttackRange(x, y)) {
-            socket.send(JSON.stringify({ action: 'attack', x, y }));
-          }
-          setSelectedUnitId(null);
-          setMultiSelectedIds([]);
         } else {
-          setSelectedUnitId(null);
-          setMultiSelectedIds([]);
+          // Clicked enemy unit WITHOUT holding Z
+          const hasFriendlySelection = selectedUnitId || (multiSelectedIds.length > 0 && isAttackStack);
+          if (isMyTurn && hasFriendlySelection && isEnemyInAttackRange(x, y) && socket?.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ action: 'attack', x, y }));
+            setSelectedUnitId(null);
+            setMultiSelectedIds([]);
+          } else {
+            // Otherwise, treat it as a single unit inspection for this enemy!
+            setIsAttackStack(false);
+            setSelectedUnitId(null);
+            const alreadySelected = multiSelectedIds.length === 1 && multiSelectedIds[0] === clickedUnit.id;
+            setMultiSelectedIds(alreadySelected ? [] : [clickedUnit.id]);
+          }
         }
       }
       return;
     }
 
-    if (selectedUnitId && socket?.readyState === WebSocket.OPEN) {
+    // Clicking an empty cell
+    if (isMyTurn && selectedUnitId && socket?.readyState === WebSocket.OPEN) {
       if (reachableCells.includes(`${x},${y}`)) {
         socket.send(JSON.stringify({ action: 'move', unitId: selectedUnitId, x, y }));
       }
-      setSelectedUnitId(null);
-      setMultiSelectedIds([]);
-    } else {
-      setSelectedUnitId(null);
-      setMultiSelectedIds([]);
     }
+    // Always clear selection on empty cell click!
+    setSelectedUnitId(null);
+    setMultiSelectedIds([]);
   };
 
   const handleAction = (actionType) => {
@@ -575,6 +607,8 @@ export default function App() {
       setMySide(null);
       setPlayers({ North: null, South: null });
       setWinner(null);
+      setBoardCols(COLS);
+      setBoardRows(ROWS);
     }
   };
 
@@ -668,7 +702,7 @@ export default function App() {
           if (dx === 0 && dy === 0) continue;
           const nx = cx + dx;
           const ny = cy + dy;
-          if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+          if (nx >= 0 && nx < boardCols && ny >= 0 && ny < boardRows) {
             const key = `${nx},${ny}`;
             if (!isMountain(nx, ny) && !visited.has(key)) {
               visited.add(key);
@@ -686,8 +720,8 @@ export default function App() {
   const reachableCells = (selectedUnit && isMyTurn && multiSelectedIds.length <= 1 && !sKeyHeld) ? getReachableTiles(selectedUnit) : [];
 
   const cells = [];
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
+  for (let y = 0; y < boardRows; y++) {
+    for (let x = 0; x < boardCols; x++) {
       cells.push({
         x, y,
         terrain: getTerrain(x, y),
@@ -964,43 +998,55 @@ export default function App() {
             <div style={{ fontWeight: 'bold', color: '#002fa7', marginBottom: '6px', fontSize: '10px', borderBottom: '1px solid #002fa7', paddingBottom: '4px' }}>📡 RADAR INTEL</div>
 
             {multiSelectedIds.length > 0 ? (
-              <div>
-                <div style={{ color: '#002fa7', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>
-                  {multiSelectedIds.length === 1 ? "SINGLE UNIT SELECTION" : "GROUP TELEMETRY"}
-                </div>
-                <div style={{ fontSize: '10px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                  <div>DIVISIONS: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{multiSelectedIds.length}</span></div>
-                  <div>GROUP ATK: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{totalAttackPower}</span></div>
-                  <div>GROUP DEF: <span style={{ color: '#002fa7', fontWeight: 'bold' }}>{totalDefensePower}</span></div>
+              (() => {
+                const selectedUnits = units.filter(u => multiSelectedIds.includes(u.id));
+                const firstUnit = selectedUnits[0];
+                const isFriendlyGroup = firstUnit && firstUnit.side === activeMySide;
+                const groupColor = isFriendlyGroup ? '#002fa7' : '#991b1b';
 
-                  {multiSelectedIds.length > 1 && (
-                    <div style={{
-                      fontWeight: 'bold',
-                      marginTop: '2px',
-                      color: stackOrientation ? '#10b981' : '#002fa7'
-                    }}>
-                      {stackOrientation ? "✓ ALIGNED STACK (COMBINED FIRE)" : "✓ CONNECTED SHAPE GROUP"}
+                return (
+                  <div>
+                    <div style={{ color: groupColor, fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>
+                      {isFriendlyGroup 
+                        ? (multiSelectedIds.length === 1 ? "FRIENDLY UNIT SELECTION" : "FRIENDLY GROUP TELEMETRY")
+                        : (multiSelectedIds.length === 1 ? "ENEMY UNIT TELEMETRY" : "ENEMY GROUP TELEMETRY")
+                      }
                     </div>
-                  )}
-                </div>
+                    <div style={{ fontSize: '10px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      <div>DIVISIONS: <span style={{ color: groupColor, fontWeight: 'bold' }}>{multiSelectedIds.length}</span></div>
+                      <div>GROUP ATK: <span style={{ color: groupColor, fontWeight: 'bold' }}>{totalAttackPower}</span></div>
+                      <div>GROUP DEF: <span style={{ color: groupColor, fontWeight: 'bold' }}>{totalDefensePower}</span></div>
 
-                {hoveredUnit && hoveredUnit.side !== turn && (
-                  <div style={{ marginTop: '6px', paddingTop: '4px', borderTop: '1px solid #cbd5e1', fontSize: '9px' }}>
-                    <div style={{ fontWeight: 'bold', color: hoveredUnit.side === 'North' ? '#002fa7' : '#991b1b', marginBottom: '2px' }}>
-                      TARGET: {hoveredStats.label} [{hoveredUnit.symbol}] (DEF: {hoveredStats.currentDefense})
-                    </div>
-                    <div style={{ fontWeight: 'bold' }}>
-                      {totalAttackPower - hoveredStats.currentDefense >= 2 ? (
-                        <span style={{ color: '#10b981' }}>✓ DESTROY CONFIRMED</span>
-                      ) : totalAttackPower - hoveredStats.currentDefense === 1 ? (
-                        <span style={{ color: '#f59e0b' }}>↩ PUSH TO RETREAT</span>
-                      ) : (
-                        <span style={{ color: '#ef4444' }}>✗ ATTACK REPELLED</span>
+                      {multiSelectedIds.length > 1 && (
+                        <div style={{
+                          fontWeight: 'bold',
+                          marginTop: '2px',
+                          color: stackOrientation ? '#10b981' : groupColor
+                        }}>
+                          {stackOrientation ? "✓ ALIGNED STACK (COMBINED FIRE)" : "✓ CONNECTED SHAPE GROUP"}
+                        </div>
                       )}
                     </div>
+
+                    {isFriendlyGroup && hoveredUnit && hoveredUnit.side !== turn && (
+                      <div style={{ marginTop: '6px', paddingTop: '4px', borderTop: '1px solid #cbd5e1', fontSize: '9px' }}>
+                        <div style={{ fontWeight: 'bold', color: hoveredUnit.side === 'North' ? '#002fa7' : '#991b1b', marginBottom: '2px' }}>
+                          TARGET: {hoveredStats.label} [{hoveredUnit.symbol}] (DEF: {hoveredStats.currentDefense})
+                        </div>
+                        <div style={{ fontWeight: 'bold' }}>
+                          {totalAttackPower - hoveredStats.currentDefense >= 2 ? (
+                            <span style={{ color: '#10b981' }}>✓ DESTROY CONFIRMED</span>
+                          ) : totalAttackPower - hoveredStats.currentDefense === 1 ? (
+                            <span style={{ color: '#f59e0b' }}>↩ PUSH TO RETREAT</span>
+                          ) : (
+                            <span style={{ color: '#ef4444' }}>✗ ATTACK REPELLED</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                );
+              })()
             ) : hoveredUnit ? (
               <div>
                 <div style={{ color: hoveredUnit.side === 'North' ? '#002fa7' : '#991b1b', fontWeight: 'bold', fontSize: '11px', marginBottom: '4px' }}>
@@ -1035,12 +1081,12 @@ export default function App() {
             <div style={{
               flexGrow: 1,
               display: 'grid',
-              gridTemplateColumns: 'repeat(25, minmax(0, 1fr))',
+              gridTemplateColumns: `repeat(${boardCols}, minmax(0, 1fr))`,
               gap: '1px',
               padding: '0 8px',
               boxSizing: 'border-box'
             }}>
-              {Array.from({ length: 25 }).map((_, i) => (
+              {Array.from({ length: boardCols }).map((_, i) => (
                 <div key={i} style={{ display: 'flex', justifyContent: 'center', fontSize: '9px', color: '#002fa7', opacity: 0.4, fontWeight: 'bold' }}>
                   {i}
                 </div>
@@ -1055,13 +1101,13 @@ export default function App() {
               width: '24px',
               minWidth: '24px',
               display: 'grid',
-              gridTemplateRows: 'repeat(20, minmax(0, 1fr))',
+              gridTemplateRows: `repeat(${boardRows}, minmax(0, 1fr))`,
               gap: '1px',
               padding: '8px 0',
               boxSizing: 'border-box',
               alignItems: 'center'
             }}>
-              {Array.from({ length: 20 }).map((_, i) => (
+              {Array.from({ length: boardRows }).map((_, i) => (
                 <div key={i} style={{ display: 'flex', justifyContent: 'center', fontSize: '9px', color: '#002fa7', opacity: 0.4, fontWeight: 'bold' }}>
                   {i}
                 </div>
@@ -1069,7 +1115,7 @@ export default function App() {
             </div>
 
             {/* Grid Container */}
-            <div ref={gridRef} style={styles.gridContainer}>
+            <div ref={gridRef} style={{ ...styles.gridContainer, gridTemplateColumns: `repeat(${boardCols}, minmax(0, 1fr))`, maxWidth: boardCols === 10 ? '550px' : '100%', margin: boardCols === 10 ? '0 auto' : '0' }}>
               {/* Animated projectile dots */}
               {tracers.map(t => (
                 <div
@@ -1104,7 +1150,12 @@ export default function App() {
                 if (isSelected) {
                   cellClass = "cell-selected-active";
                 } else if (isMultiSelected) {
-                  cellClass = stackOrientation ? "cell-selected-multi-stack" : "cell-selected-multi-shape";
+                  const isFriendly = occupyingUnit.side === activeMySide;
+                  if (isFriendly) {
+                    cellClass = stackOrientation ? "cell-selected-multi-stack" : "cell-selected-multi-shape";
+                  } else {
+                    cellClass = stackOrientation ? "cell-selected-enemy-stack" : "cell-selected-enemy";
+                  }
                 } else if (isReachable) {
                   cellClass = "cell-reachable";
                 } else if (inRange) {

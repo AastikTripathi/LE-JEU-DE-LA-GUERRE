@@ -5,7 +5,7 @@ import sys
 
 
 class WarGameAI:
-    def __init__(self, engine, side: str = "South"):
+    def __init__(self, engine, side: str = "South", position_history: dict = None, turn_counter: int = 0):
         self.engine = engine
         self.side = side
         self.enemy_side = "North" if side == "South" else "South"
@@ -25,7 +25,8 @@ class WarGameAI:
         self.target_arsenal_coords = None
 
         # --- NEW DIAGNOSTIC SYSTEM PROPERTIES ---
-        self.position_history = {}  # Format: {unit_id: [(x1, y1), (x2, y2), ...]}
+        self.position_history = position_history if position_history is not None else {}
+        self.turn_counter = turn_counter
         self._distance_cache = {}  # {target_y: {(x, y): distance}}
         self.cluster_turn_cursor = 0
         self.orchestration_data = {}
@@ -97,7 +98,7 @@ class WarGameAI:
     def enemy_evaluator(self):
         """Lazily constructs a WarGameAI from the enemy's POV for perspective scoring."""
         if self._enemy_evaluator is None:
-            self._enemy_evaluator = WarGameAI(self.engine, side=self.enemy_side)
+            self._enemy_evaluator = WarGameAI(self.engine, side=self.enemy_side, turn_counter=self.turn_counter)
             self._enemy_evaluator.defensive_weight = 0.0
         return self._enemy_evaluator
 
@@ -497,7 +498,7 @@ class WarGameAI:
         return cluster_map
 
     def evaluate_board(self, units: list, return_breakdown: bool = False,
-                       base_enemy_connected: set = None) -> dict or float:
+                       base_enemy_connected: set = None, is_end_turn: bool = True) -> dict or float:
         base_material = 0.0
         territory_score = 0.0
         role_score = 0.0
@@ -626,7 +627,10 @@ class WarGameAI:
                     min_dist_e = min(max(abs(ux - ex), abs(uy - ey)) for ex, ey in all_enemy_positions)
                     role_score += (45 - min_dist_e) * 90.0
 
-                if is_connected: role_score += 100.0
+                if is_connected:
+                    role_score += 2000.0
+                else:
+                    role_score -= 80000.0 if is_end_turn else 400.0
                 continue
 
             all_enemy_arsenals = self.engine.arsenals[self.enemy_side]
@@ -672,7 +676,10 @@ class WarGameAI:
 
             dist_to_goal = self.get_path_distance_to_goal(ux, uy, target_y)
             role_score += (20 - dist_to_goal) * 10.0
-            if is_connected: role_score += 50.0
+            if is_connected:
+                role_score += 1000.0
+            else:
+                role_score -= 60000.0 if is_end_turn else 200.0
 
             # Formation / Cohesion stacking bonus: reward combat units that stand adjacent to other friendly combat units
             if "relay" not in u_type:
@@ -856,15 +863,18 @@ class WarGameAI:
 
         target_y = 0 if self.side == "South" else 19
 
-        # --- UPDATE TEMPORAL TRACKER KEYS ---
-        for u in units:
-            if u.get("side") == self.side:
-                uid = u["id"]
-                if uid not in self.position_history:
-                    self.position_history[uid] = []
-                self.position_history[uid].append((u["x"], u["y"]))
-                if len(self.position_history[uid]) > 8:
-                    self.position_history[uid].pop(0)
+        # --- UPDATE TEMPORAL TRACKER KEYS (Once per turn) ---
+        last_updated = self.position_history.get("_last_updated_turn")
+        if last_updated is None or last_updated != self.turn_counter:
+            self.position_history["_last_updated_turn"] = self.turn_counter
+            for u in units:
+                if u.get("side") == self.side:
+                    uid = u["id"]
+                    if uid not in self.position_history:
+                        self.position_history[uid] = []
+                    self.position_history[uid].append((u["x"], u["y"]))
+                    if len(self.position_history[uid]) > 8:
+                        self.position_history[uid].pop(0)
 
         # Run the Global Tactical Orchestrator
         self._orchestrate_tactics(units, base_my_connected, base_enemy_connected)
@@ -1247,13 +1257,14 @@ class WarGameAI:
                     if dist_moved <= 1:
                         mod += 0.0 if self.macro_state in ["ANNIHILATION_HUNT", "DESPERATION_CHOKE"] else 15.0
 
-            my_breakdown = self.evaluate_board(temp, return_breakdown=True, base_enemy_connected=base_enemy_connected)
+            is_final_state = (action["action_type"] == "end_turn" or current_state.get("moves_left", 5) == 1)
+            my_breakdown = self.evaluate_board(temp, return_breakdown=True, base_enemy_connected=base_enemy_connected, is_end_turn=is_final_state)
 
             if my_breakdown["TOTAL"] + mod < best_score - 500.0:
                 continue
 
             if self.defensive_weight > 0:
-                enemy_score = self.enemy_evaluator.evaluate_board(temp, base_enemy_connected=base_my_connected)
+                enemy_score = self.enemy_evaluator.evaluate_board(temp, base_enemy_connected=base_my_connected, is_end_turn=is_final_state)
                 score = (my_breakdown["TOTAL"] - self.defensive_weight * enemy_score) + mod
             else:
                 score = my_breakdown["TOTAL"] + mod
@@ -1278,16 +1289,7 @@ class WarGameAI:
                     if action["action_type"] == "move" and (action["x"], action["y"]) in recent_pos:
                         score -= 200000.0
 
-            # Apply stasis stagnation penalty if stuck units remain stationary in this candidate state
-            stagnation_penalty = 0.0
-            for u in units:
-                if u.get("side") == self.side:
-                    anomaly = self._detect_behavioral_anomaly(u["id"])
-                    if anomaly:
-                        u_temp = next((ut for ut in temp if ut["id"] == u["id"]), None)
-                        if u_temp and u_temp["x"] == u["x"] and u_temp["y"] == u["y"]:
-                            stagnation_penalty += 35000.0
-            score -= stagnation_penalty
+
 
             if score > best_score:
                 best_score = score
