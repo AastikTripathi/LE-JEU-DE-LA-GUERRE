@@ -71,6 +71,15 @@ export default function App() {
   const [showRules, setShowRules] = useState(false);   // info panel toggle
   const gridRef = useRef(null);
   const prevUnitsRef = useRef(INITIAL_UNITS);
+  const currentUnitsRef = useRef(INITIAL_UNITS);
+
+  // Animation states
+  const [movingUnitId, setMovingUnitId] = useState(null);
+  const [moveOffsets, setMoveOffsets] = useState({});
+  const [instantUnits, setInstantUnits] = useState({});
+  const [lungingUnitIds, setLungingUnitIds] = useState({});
+  const [repelShieldUnitId, setRepelShieldUnitId] = useState(null);
+  const [dyingUnits, setDyingUnits] = useState([]);
 
   // Player Identity States
   const [mySide, setMySide] = useState(null);
@@ -94,6 +103,50 @@ export default function App() {
         z-index: 200;
         animation: projectileTravel var(--dur) ease-in forwards;
         left: 0; top: 0;
+      }
+
+      /* 2D Absolute unit positioning and animations */
+      .absolute-unit-wrapper-2d {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        transition: left 0.4s ease-in-out, top 0.4s ease-in-out;
+        pointer-events: none;
+      }
+      .unit-badge-2d {
+        width: 80%;
+        height: 80%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 3px;
+        border: 2px solid;
+        font-weight: bold;
+        font-size: 12px;
+        z-index: 2;
+        pointer-events: auto;
+        transition: transform 0.25s ease-in-out, box-shadow 0.25s ease, filter 0.25s ease;
+      }
+      .unit-badge-2d.no-transition {
+        transition: none !important;
+      }
+      .unit-badge-2d.lifted {
+        transform: scale(1.22) translateY(-8px);
+        box-shadow: 0 10px 16px rgba(0, 0, 0, 0.4);
+        z-index: 100;
+      }
+      .unit-badge-2d.magical-shield-2d {
+        box-shadow: 0 0 18px #3b82f6, inset 0 0 6px #3b82f6 !important;
+        border-color: #60a5fa !important;
+      }
+      .unit-badge-2d.disintegrating-2d {
+        animation: disintegrate2d 0.75s cubic-bezier(0.25, 0.8, 0.25, 1) forwards;
+      }
+      @keyframes disintegrate2d {
+        0% { transform: scale(1) rotate(0deg); opacity: 1; filter: brightness(2); }
+        100% { transform: scale(0) rotate(180deg); opacity: 0; filter: brightness(4) blur(2px); }
       }
 
       /* Red kill-flash bloom on target tile */
@@ -380,7 +433,101 @@ export default function App() {
           setTimeout(() => setErrorMessage(''), 4000);
         }
       } else {
+        // Intercept unit movement to trigger smooth glide transitions synchronously
+        const incomingUnits = data.units || [];
+        const currentUnits = currentUnitsRef.current;
+        const newOffsets = {};
+        const movingIds = [];
+
+        incomingUnits.forEach(unit => {
+          const prev = currentUnits.find(u => u.id === unit.id);
+          if (prev && (prev.x !== unit.x || prev.y !== unit.y)) {
+            newOffsets[unit.id] = { dx: prev.x - unit.x, dy: prev.y - unit.y };
+            movingIds.push(unit.id);
+          }
+        });
+
+        if (movingIds.length > 0) {
+          movingIds.forEach(id => setMovingUnitId(id));
+          setTimeout(() => {
+            movingIds.forEach(id => setMovingUnitId(null));
+          }, 600);
+        }
+
+        // Intercept unit death to trigger disintegration animations
+        const incomingIds = (data.units || []).map(u => u.id);
+        const deadUnits = currentUnitsRef.current.filter(u => !incomingIds.includes(u.id));
+
+        if (deadUnits.length > 0) {
+          setDyingUnits(prev => [...prev, ...deadUnits.map(du => ({ ...du, phase: 'ramming' }))]);
+          
+          // Phase 2: transition to disintegration at impact (350ms)
+          setTimeout(() => {
+            setDyingUnits(prev => prev.map(u => deadUnits.some(du => du.id === u.id) ? { ...u, phase: 'disintegrating' } : u));
+          }, 350);
+
+          // Phase 3: clean up from dying state (1100ms)
+          setTimeout(() => {
+            setDyingUnits(prev => prev.filter(u => !deadUnits.some(du => du.id === u.id)));
+          }, 1100);
+        }
+
+        // Combat Animation Triggers snapshot (before overwriting currentUnitsRef)
+
+        if (data.lastCombat) {
+          const tx = data.lastCombat.targetX;
+          const ty = data.lastCombat.targetY;
+          const res = data.lastCombat.result;
+
+          // Look up the defending unit in the snapshot state before they were potentially deleted
+          const defender = currentUnits.find(u => u.x === tx && u.y === ty);
+          if (defender) {
+            const defenderSide = defender.side;
+            const attackerSide = defenderSide === 'North' ? 'South' : 'North';
+
+            // Find all Infantry/Cavalry attackers in range of the target in the snapshot
+            const attackers = currentUnits.filter(u => {
+              if (u.side !== attackerSide) return false;
+              const dx = Math.abs(u.x - tx);
+              const dy = Math.abs(u.y - ty);
+              const maxRange = u.type.toLowerCase() === 'artillery' ? 3 : 1;
+              return dx <= maxRange && dy <= maxRange;
+            });
+
+            // Trigger lunge animation for non-artillery attackers
+            attackers.forEach(attacker => {
+              const uType = attacker.type.toLowerCase();
+              if (uType !== 'artillery') {
+                const diffX = tx - attacker.x;
+                const diffY = ty - attacker.y;
+                const len = Math.hypot(diffX, diffY) || 1;
+                const dx = (diffX / len) * 0.45;
+                const dy = (diffY / len) * 0.45;
+
+                setLungingUnitIds(prev => ({ ...prev, [attacker.id]: { dx, dy } }));
+                setTimeout(() => {
+                  setLungingUnitIds(prev => {
+                    const next = { ...prev };
+                    delete next[attacker.id];
+                    return next;
+                  });
+                }, 350);
+              }
+            });
+
+            // Trigger protection shield & repel flashes if combat was repelled
+            if (res !== "DESTROY") {
+              setRepelFlash({ x: tx, y: ty, result: res });
+              setTimeout(() => setRepelFlash(null), 600);
+
+              setRepelShieldUnitId(defender.id);
+              setTimeout(() => setRepelShieldUnitId(null), 900);
+            }
+          }
+        }
+
         setUnits(data.units || []);
+        currentUnitsRef.current = data.units || [];
         if (data.cols !== undefined) setBoardCols(data.cols);
         if (data.rows !== undefined) setBoardRows(data.rows);
 
@@ -406,10 +553,16 @@ export default function App() {
 
         if (data.yourSide) setMySide(data.yourSide);
         if (data.players) setPlayers(data.players);
-        if (data.winner !== undefined) setWinner(data.winner);
-        if (data.lastCombat && data.lastCombat.result !== "DESTROY") {
-          setRepelFlash({ x: data.lastCombat.targetX, y: data.lastCombat.targetY, result: data.lastCombat.result });
-          setTimeout(() => setRepelFlash(null), 600);
+
+        // DELAY WINNER DECLARATION TO ALLOW ANIMATIONS TO RESOLVE
+        if (data.winner !== undefined) {
+          if (data.winner) {
+            setTimeout(() => {
+              setWinner(data.winner);
+            }, 1200);
+          } else {
+            setWinner(null);
+          }
         }
       }
     };
@@ -1200,22 +1353,107 @@ export default function App() {
                       <div style={{ ...styles.locDot, backgroundColor: isNorthLoc && isSouthLoc ? '#6b21a8' : isNorthLoc ? '#002fa7' : '#991b1b' }} />
                     )}
 
-                    {occupyingUnit ? (
-                      <div style={{
-                        ...styles.unitBadge,
-                        backgroundColor: occupyingUnit.side === 'North' ? '#002fa7' : '#991b1b',
-                        borderColor: occupyingUnit.side === 'North' ? '#002fa7' : '#991b1b',
-                        color: '#ffffff',
-                        opacity: isUnitConnected ? 1 : 0.35
-                      }}>
-                        {occupyingUnit.symbol}
-                      </div>
-                    ) : (
-                      <span style={{ ...styles.terrainLabel, color: '#002fa7', opacity: 0.3 }}>{terrain.label}</span>
-                    )}
+                    <span style={{ ...styles.terrainLabel, color: '#002fa7', opacity: 0.3 }}>{terrain.label}</span>
                   </div>
                 );
               })}
+
+              {/* 2D absolute-positioned active units overlay with smooth gliding transitions */}
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '8px',
+                  left: '8px',
+                  right: '8px',
+                  bottom: '8px',
+                  pointerEvents: 'none',
+                  zIndex: 10
+                }}
+              >
+                {units.map(unit => {
+                  const x = unit.x;
+                  const y = unit.y;
+                  const isSelected = unit.id === selectedUnitId;
+                  const isMultiSelected = multiSelectedIds.includes(unit.id);
+                  const isUnitConnected = connectedUnitIds.includes(unit.id);
+                  const isMoving = movingUnitId === unit.id;
+                  const hasShield = repelShieldUnitId === unit.id;
+
+                  // Lunge offsets during attack/ramming animations (in cell percentages)
+                  const lunge = lungingUnitIds[unit.id];
+                  const dx = lunge ? lunge.dx : 0;
+                  const dy = lunge ? lunge.dy : 0;
+
+                  const wPct = 100 / boardCols;
+                  const hPct = 100 / boardRows;
+
+                  return (
+                    <div
+                      key={unit.id}
+                      className="absolute-unit-wrapper-2d"
+                      style={{
+                        left: `${x * wPct}%`,
+                        top: `${y * hPct}%`,
+                        width: `${wPct}%`,
+                        height: `${hPct}%`
+                      }}
+                    >
+                      <div
+                        className={`unit-badge-2d ${isSelected || isMultiSelected ? 'lifted' : ''} ${isMoving ? 'moving' : ''} ${hasShield ? 'magical-shield-2d' : ''}`}
+                        onClick={() => handleCellClick(x, y)}
+                        onMouseEnter={() => setHoveredCell({ x, y })}
+                        onMouseLeave={() => setHoveredCell(null)}
+                        style={{
+                          backgroundColor: unit.side === 'North' ? '#002fa7' : '#991b1b',
+                          borderColor: unit.side === 'North' ? '#002fa7' : '#991b1b',
+                          color: '#ffffff',
+                          opacity: isUnitConnected ? 1 : 0.35,
+                          transform: (dx !== 0 || dy !== 0)
+                            ? `translate(calc(${dx * 100}%), calc(${dy * 100}%))`
+                            : undefined
+                        }}
+                      >
+                        {unit.symbol}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* 2D absolute-positioned dying units disintegration overlay */}
+                {dyingUnits.map(unit => {
+                  const x = unit.x;
+                  const y = unit.y;
+                  const isDisintegrating = unit.phase === 'disintegrating';
+
+                  const wPct = 100 / boardCols;
+                  const hPct = 100 / boardRows;
+
+                  return (
+                    <div
+                      key={`dying-${unit.id}`}
+                      className="absolute-unit-wrapper-2d"
+                      style={{
+                        left: `${x * wPct}%`,
+                        top: `${y * hPct}%`,
+                        width: `${wPct}%`,
+                        height: `${hPct}%`
+                      }}
+                    >
+                      <div
+                        className={`unit-badge-2d ${isDisintegrating ? 'disintegrating-2d' : ''}`}
+                        style={{
+                          backgroundColor: unit.side === 'North' ? '#002fa7' : '#991b1b',
+                          borderColor: unit.side === 'North' ? '#002fa7' : '#991b1b',
+                          color: '#ffffff',
+                          opacity: 0.85
+                        }}
+                      >
+                        {unit.symbol}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
