@@ -324,10 +324,58 @@ class WarGameAI:
                     threat_score -= (10 - dist) * 130.0
 
         if friendly_relays:
-            connected_now = self.engine.get_connected_units(units, self.side)
+            connected_now = self.engine.get_connected_now(units, self.side) if hasattr(self.engine, 'get_connected_now') else self.engine.get_connected_units(units, self.side)
             for relay in friendly_relays:
                 if relay["id"] not in connected_now:
                     threat_score -= 900.0
+
+        # Combat units danger detection: penalize combat units that are within line-of-sight & range of active enemy attackers
+        friendly_combat = [u for u in units if u.get("side") == self.side and "relay" not in u.get("type", "").lower()]
+        try:
+            enemy_connected = set(self.engine.get_connected_units(units, self.enemy_side))
+        except Exception:
+            enemy_connected = set()
+
+        for ally in friendly_combat:
+            ally_in_danger = False
+            for enemy in enemy_units:
+                if enemy["id"] not in enemy_connected:
+                    continue
+                enemy_stats = self.engine.get_stats(enemy["type"])
+                if self.engine.check_line_of_sight(enemy["x"], enemy["y"], ally["x"], ally["y"], enemy_stats["range"], units):
+                    ally_in_danger = True
+                    break
+            if ally_in_danger:
+                ally_type = ally.get("type", "").lower()
+                val = self.unit_values.get(ally_type, 20)
+                threat_score -= val * 8.0  # E.g. -160 for infantry, -440 for cavalry, -320 for artillery
+
+        # Relay downstream deactivation check
+        try:
+            connected_now_set = set(connected_now)
+        except Exception:
+            connected_now_set = set()
+
+        for relay in friendly_relays:
+            relay_in_danger = False
+            for enemy in enemy_units:
+                if enemy["id"] not in enemy_connected:
+                    continue
+                enemy_stats = self.engine.get_stats(enemy["type"])
+                if self.engine.check_line_of_sight(enemy["x"], enemy["y"], relay["x"], relay["y"], enemy_stats["range"], units):
+                    relay_in_danger = True
+                    break
+
+            if relay_in_danger:
+                units_without_relay = [u for u in units if u["id"] != relay["id"]]
+                try:
+                    connected_without_relay = set(self.engine.get_connected_units(units_without_relay, self.side))
+                    downstream_count = len(connected_now_set) - len(connected_without_relay) - 1
+                    if downstream_count > 0:
+                        # Heavy penalty per downstream unit threatened with deactivation
+                        threat_score -= downstream_count * 1000.0
+                except Exception:
+                    pass
 
         return threat_score
 
@@ -630,7 +678,7 @@ class WarGameAI:
                 if is_connected:
                     role_score += 2000.0
                 else:
-                    role_score -= 80000.0 if is_end_turn else 400.0
+                    role_score -= 80000.0
                 continue
 
             all_enemy_arsenals = self.engine.arsenals[self.enemy_side]
@@ -679,7 +727,7 @@ class WarGameAI:
             if is_connected:
                 role_score += 1000.0
             else:
-                role_score -= 60000.0 if is_end_turn else 200.0
+                role_score -= 60000.0
 
             # Formation / Cohesion stacking bonus: reward combat units that stand adjacent to other friendly combat units
             if "relay" not in u_type:
@@ -939,11 +987,12 @@ class WarGameAI:
             act_uid = action.get("unitId")
 
             if act_uid and action["action_type"] == "move":
-                # Immediate oscillation check: moving back to previous position is heavily penalized
+                # Immediate oscillation check: moving back to any of the last 3 positions is heavily penalized
                 history = self.position_history.get(act_uid, [])
                 if len(history) >= 2:
-                    if (action["x"], action["y"]) == history[-2]:
-                        mod -= 180000.0  # Devastating penalty for immediate back-and-forth oscillation
+                    recent_history = history[-3:]
+                    if (action["x"], action["y"]) in recent_history:
+                        mod -= 180000.0  # Devastating penalty for immediate loop oscillation
 
                 has_stuck_unit = any(self._detect_behavioral_anomaly(u["id"]) is not None for u in ai_units)
                 if has_stuck_unit:
@@ -1007,24 +1056,20 @@ class WarGameAI:
                     if target_unit:
                         target_connected = target_unit["id"] in self.engine.get_connected_units(temp, self.enemy_side)
                         is_target_cutoff = not target_connected
-                    if is_target_cutoff:
-                        mod += 80000.0  # Massive priority to eliminate cut-off units!
-                    if target_unit and "relay" in target_unit.get("type", "").lower():
-                        mod += 150000.0  # Chess Queen priority bonus to destroy enemy Relays!
-
                     if combat["result"] == "DESTROY":
                         # Shoot to kill: large destroy bonus
                         mod += 15000.0 + combat["net_force"] * 100.0
                         if is_target_cutoff:
-                            mod += 5000.0  # extra priority to kill cut off units quickly!
+                            mod += 80000.0  # Massive priority to eliminate cut-off units!
+                        if target_unit and "relay" in target_unit.get("type", "").lower():
+                            mod += 150000.0  # Chess Queen priority bonus to destroy enemy Relays!
                         temp = [u for u in temp if not (u["x"] == action["x"] and u["y"] == action["y"])]
                     elif combat["result"] == "RETREAT":
                         mod += 3000.0 + combat["net_force"] * 100.0
                         if is_target_cutoff:
-                            mod += 2000.0
-                        target_connected = self.engine.get_connected_units(temp, self.enemy_side)
-                        if target_unit and target_unit["id"] not in target_connected:
-                            mod += 1000.0
+                            mod += 40000.0  # Moderate priority to push cut-off units back!
+                        if target_unit and "relay" in target_unit.get("type", "").lower():
+                            mod += 75000.0  # Moderate priority to push relays back!
                     else:
                         # Wasting an attack on a failed combat is heavily penalized
                         mod -= 100000.0
@@ -1342,4 +1387,3 @@ class WarGameAI:
                 return self.select_best_action(current_state, allowed_clusters=remaining_clusters)
 
         return best_action if best_action else {"action_type": "end_turn"}
-
